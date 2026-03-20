@@ -222,7 +222,7 @@ def summarize_paper(paper: dict) -> str:
     """7섹션 전체 요약 (MD 파일용)."""
     msg = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=4096,
+        max_tokens=8192,
         messages=[{"role": "user", "content": SUMMARY_PROMPT.format(
             title=paper["title"],
             authors=paper["authors"],
