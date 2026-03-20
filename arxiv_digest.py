@@ -240,28 +240,96 @@ def extract_goal_section(summary: str) -> str:
 
 # ── MD 파일 생성 ──────────────────────────────────────────────────────────
 
-def create_paper_md(paper: dict, summary: str) -> str:
-    """논문 요약 마크다운 문자열 생성."""
+def create_paper_html(paper: dict, summary: str) -> str:
+    """논문 요약 HTML 생성 — MathJax(수식) + marked.js(마크다운) 렌더링."""
     venue_str = ""
     if paper.get("venue"):
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
-        venue_str = f"\n**학회:** {paper['venue']}{yr}"
+        venue_str = f"<br><strong>학회:</strong> {paper['venue']}{yr}"
 
-    header = f"""# {paper['title']}
+    # summary 안의 백틱을 JS 템플릿 리터럴과 충돌하지 않게 이스케이프
+    summary_escaped = summary.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
 
-**저자:** {paper['authors']}
-**출판:** {paper['published']}{venue_str}
-**arXiv:** {paper['url']}
-**검색 출처:** {paper['keyword']}
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{paper['title']}</title>
 
----
+<!-- MathJax: 수식 렌더링 -->
+<script>
+MathJax = {{
+  tex: {{
+    inlineMath: [['$', '$']],
+    displayMath: [['$$', '$$']],
+    processEscapes: true,
+  }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea'] }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
 
-{summary}
+<!-- marked.js: 마크다운 → HTML -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
----
-*생성일: {datetime.now().strftime('%Y-%m-%d')} | GitHub Actions + Claude API*
-"""
-    return header
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 820px;
+    margin: 40px auto;
+    padding: 0 24px 60px;
+    color: #1a1a2e;
+    line-height: 1.75;
+    background: #fff;
+  }}
+  h1 {{ font-size: 22px; font-weight: 600; border-bottom: 2px solid #7c5cbf; padding-bottom: 10px; }}
+  h2 {{ font-size: 17px; font-weight: 600; color: #5a3ea8; margin-top: 32px; border-left: 4px solid #7c5cbf; padding-left: 10px; }}
+  h3 {{ font-size: 15px; font-weight: 600; color: #333; margin-top: 20px; }}
+  .meta {{ color: #888; font-size: 13px; margin: 8px 0 20px; }}
+  .meta a {{ color: #7c5cbf; text-decoration: none; }}
+  hr {{ border: none; border-top: 1px solid #eee; margin: 24px 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }}
+  th {{ background: #f0eeff; color: #5a3ea8; padding: 8px 12px; text-align: left; border: 1px solid #d4ccf5; }}
+  td {{ padding: 7px 12px; border: 1px solid #e8e8e8; }}
+  tr:nth-child(even) td {{ background: #faf9ff; }}
+  code {{ background: #f0eeff; padding: 2px 6px; border-radius: 4px; font-size: 13px; font-family: "SF Mono", Menlo, monospace; }}
+  pre {{ background: #f6f5ff; border-radius: 6px; padding: 14px; overflow-x: auto; }}
+  pre code {{ background: none; padding: 0; }}
+  blockquote {{ border-left: 3px solid #d4ccf5; margin: 0; padding-left: 16px; color: #666; }}
+  li {{ margin: 4px 0; }}
+  .footer {{ color: #bbb; font-size: 11px; margin-top: 40px; border-top: 1px solid #eee; padding-top: 10px; }}
+</style>
+</head>
+<body>
+
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<hr>
+<div id="content"></div>
+<div class="footer">생성일: {datetime.now().strftime('%Y-%m-%d')} | GitHub Actions + Claude API</div>
+
+<script>
+  // 제목·메타 삽입
+  document.getElementById('title').textContent = {json.dumps(paper['title'])};
+  document.getElementById('meta').innerHTML =
+    '<strong>저자:</strong> {paper["authors"]} &nbsp;|&nbsp; '
+    + '<strong>출판:</strong> {paper["published"]}'
+    + '{venue_str}'
+    + '<br><strong>arXiv:</strong> <a href="{paper["url"]}" target="_blank">{paper["url"]}</a>';
+
+  // marked 설정 — GFM(표, 코드블록 등) 활성화
+  marked.setOptions({{ gfm: true, breaks: true }});
+
+  // 마크다운 → HTML 변환 후 삽입
+  const raw = `{summary_escaped}`;
+  document.getElementById('content').innerHTML = marked.parse(raw);
+
+  // MathJax 재실행 (marked가 DOM 변경 후)
+  if (window.MathJax) MathJax.typesetPromise();
+</script>
+</body>
+</html>"""
 
 
 # ── 이메일 빌드 ───────────────────────────────────────────────────────────
@@ -304,7 +372,7 @@ def build_email_html(papers: list, one_liners: list, keywords: list) -> str:
           </p>
           <p style="margin:0 0 8px;font-size:14px;line-height:1.7;color:#444">{ol}</p>
           <p style="margin:0;font-size:12px;color:#aaa">
-            📎 상세 요약(수식·표 포함)은 첨부된 .md 파일을 확인하세요.
+            📎 상세 요약(수식·표 포함)은 첨부된 .html 파일을 브라우저로 열어보세요.
           </p>
         </div>"""
 
@@ -322,7 +390,7 @@ def build_email_html(papers: list, one_liners: list, keywords: list) -> str:
     <div style="background:#fffbea;border:1px solid #f0d080;border-radius:6px;
     padding:12px 16px;margin-bottom:20px;font-size:13px">
       오늘의 논문 <strong>{len(papers)}편</strong>입니다.
-      각 논문의 <strong>상세 요약(수식·표·Step-by-step 방법론)</strong>은 첨부된 <code>.md</code> 파일에 있습니다.<br><br>
+      각 논문의 <strong>상세 요약(수식·표·Step-by-step 방법론)</strong>은 첨부된 <code>.html</code> 파일을 브라우저로 열어보세요.<br><br>
       <strong>다 읽고 회신해주세요:</strong>
       <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">1: 관심있음 / 2: 보통 / 3: 관심없음</code>
       또는 <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">앞으로 RL 위주로 보내줘</code>
@@ -336,8 +404,8 @@ def build_email_html(papers: list, one_liners: list, keywords: list) -> str:
     </body></html>"""
 
 
-def send_email(subject: str, html_body: str, md_paths: list):
-    """HTML 본문 + MD 파일 첨부."""
+def send_email(subject: str, html_body: str, attach_paths: list):
+    """HTML 본문 + HTML 첨부파일 발송."""
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"]    = os.environ["GMAIL_USER"]
@@ -347,13 +415,13 @@ def send_email(subject: str, html_body: str, md_paths: list):
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alt)
 
-    for md_path in md_paths:
-        with open(md_path, "rb") as f:
-            part = MIMEBase("text", "markdown")
+    for path in attach_paths:
+        with open(path, "rb") as f:
+            part = MIMEBase("text", "html")
             part.set_payload(f.read())
         encoders.encode_base64(part)
         part.add_header("Content-Disposition",
-                        f'attachment; filename="{Path(md_path).name}"')
+                        f'attachment; filename="{Path(path).name}"')
         msg.attach(part)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
@@ -405,39 +473,39 @@ def main():
     batch = filtered[:batch_size]
     print(f"\n{len(batch)}편 처리 시작...")
 
-    one_liners = []
-    md_paths   = []
+    one_liners   = []
+    html_paths   = []
 
     with _tf.TemporaryDirectory() as tmpdir:
         for i, p in enumerate(batch, 1):
             venue_info = f"({p['venue']})" if p.get("venue") else "(학회 미확인)"
             print(f"  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
 
-            # 전체 요약 (MD용)
+            # 전체 요약 생성
             summary   = summarize_paper(p)
-            # 목표 Task 섹션 추출 (이메일 본문용) — API 추가 호출 없음
+            # 목표 Task 섹션 추출 (이메일 본문용)
             one_liner = extract_goal_section(summary)
             one_liners.append(one_liner)
 
-            # MD 파일 생성
-            md_content = create_paper_md(p, summary)
-            safe_title = re.sub(r'[^\w\s-]', '', p['title'])[:45].strip()
-            md_path    = os.path.join(tmpdir, f"{i:02d}_{safe_title}.md")
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md_content)
-            md_paths.append(md_path)
-            print(f"    MD 생성 완료")
+            # HTML 파일 생성 (MathJax + marked.js)
+            html_content = create_paper_html(p, summary)
+            safe_title   = re.sub(r'[^\w\s-]', '', p['title'])[:45].strip()
+            html_path    = os.path.join(tmpdir, f"{i:02d}_{safe_title}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+            html_paths.append(html_path)
+            print(f"    HTML 생성 완료")
 
-        html = build_email_html(batch, one_liners, state["keywords"])
-        date_str = datetime.now().strftime("%m/%d")
+        email_html = build_email_html(batch, one_liners, state["keywords"])
+        date_str   = datetime.now().strftime("%m/%d")
         venue_names = list({p["venue"] for p in batch if p.get("venue")})
-        venue_str = f" | {', '.join(venue_names)}" if venue_names else ""
+        venue_str   = f" | {', '.join(venue_names)}" if venue_names else ""
         send_email(
             f"[arXiv 다이제스트] {date_str} — {len(batch)}편{venue_str}",
-            html, md_paths,
+            email_html, html_paths,
         )
 
-    print("\n이메일 발송 완료 (MD 첨부)")
+    print("\n이메일 발송 완료 (HTML 첨부)")
 
     state["sent_papers"]     = state.get("sent_papers", []) + [p["id"] for p in batch]
     state["pending_feedback"] = [{"id": p["id"], "title": p["title"]} for p in batch]
