@@ -71,6 +71,7 @@ def get_body_text(payload: dict) -> str:
 
 def find_latest_digest_reply(service) -> tuple:
     """가장 최근 다이제스트 회신 스레드에서 사용자 회신 찾기.
+    보내는 주소 = 받는 주소인 경우도 처리.
     Returns (reply_text, message_id) or (None, None)
     """
     results = service.users().threads().list(
@@ -85,19 +86,34 @@ def find_latest_digest_reply(service) -> tuple:
             userId="me", id=thread_meta["id"], format="full"
         ).execute()
         messages = thread.get("messages", [])
+
         # 스레드에 2개 이상 메시지 = 회신 있음
         if len(messages) < 2:
             continue
-        # 마지막 메시지가 회신 (내가 보낸 게 아닌 것)
+
+        # 첫 번째 메시지(자동 발송)의 ID와 날짜를 기준으로
+        # 그 이후에 온 메시지 중 가장 최근 것을 회신으로 간주
+        # (보내는 주소 = 받는 주소여도 시간 순서로 구분)
+        first_msg_id = messages[0]["id"]
         reply_msg = messages[-1]
-        headers = {h["name"]: h["value"] for h in reply_msg["payload"]["headers"]}
-        from_addr = headers.get("From", "")
-        my_addr = os.environ.get("GMAIL_USER", "")
-        if my_addr.lower() in from_addr.lower():
-            continue  # 내가 보낸 메시지면 스킵
+
+        # 첫 메시지와 동일하면 아직 회신 없음
+        if reply_msg["id"] == first_msg_id:
+            continue
+
         body = get_body_text(reply_msg["payload"])
         if body.strip():
-            return body.strip(), reply_msg["id"]
+            # 인용된 원문(> 로 시작하는 줄)을 제거하고 실제 회신 내용만 추출
+            reply_lines = []
+            for line in body.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith(">") or stripped.startswith("On ") and "wrote:" in stripped:
+                    continue
+                reply_lines.append(line)
+            reply_text = "\n".join(reply_lines).strip()
+            if reply_text:
+                return reply_text, reply_msg["id"]
+
     return None, None
 
 
