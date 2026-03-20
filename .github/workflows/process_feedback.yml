@@ -36,7 +36,7 @@ jobs:
           POLL_INTERVAL_SECONDS: "300"
 
       - name: Restart workflow
-        if: always()
+        if: success() || failure()
         run: gh workflow run process_feedback.yml --repo ${{ github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
