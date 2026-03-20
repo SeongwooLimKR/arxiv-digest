@@ -579,8 +579,28 @@ def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str)
 
 # ── 이메일 ────────────────────────────────────────────────────────────────
 
-def build_email_html(papers: list, summaries: list, figures_per_paper: list) -> str:
+def build_email_html(papers: list, summaries: list, figures_per_paper: list, keywords: list) -> str:
     date_str = datetime.now().strftime("%Y년 %m월 %d일")
+
+    # 키워드 배지 목록
+    keyword_badges = "".join(
+        f'<span style="display:inline-block;background:#eeeafc;color:#5a3ea8;'
+        f'font-size:12px;padding:3px 10px;border-radius:12px;margin:3px 3px 3px 0">'
+        f'{kw}</span>'
+        for kw in keywords
+    )
+    keyword_section = f"""
+    <div style="background:#f5f3ff;border:1px solid #d4ccf5;border-radius:6px;
+    padding:12px 16px;margin-bottom:20px;">
+      <p style="margin:0 0 8px;font-size:12px;color:#7c5cbf;font-weight:bold">
+        현재 관심 키워드
+      </p>
+      <div>{keyword_badges}</div>
+      <p style="margin:8px 0 0;font-size:11px;color:#aaa">
+        키워드를 변경하려면 이 메일에 회신하세요. 예: <code>앞으로는 RLHF, alignment 위주로 보내줘</code>
+      </p>
+    </div>"""
+
     items = ""
     for i, (p, s, figs) in enumerate(zip(papers, summaries, figures_per_paper), 1):
         venue_badge = ""
@@ -592,7 +612,7 @@ def build_email_html(papers: list, summaries: list, figures_per_paper: list) -> 
                 f'{p["venue"]}{yr}</span>'
             )
         fig_note = (
-            f'<span style="color:#2a9d8f;font-size:12px">핵심 그림 {len(figs)}개 포함</span>'
+            f'<span style="color:#2a9d8f;font-size:12px"> · 핵심 그림 {len(figs)}개 포함</span>'
             if figs else ""
         )
         summary_html = (
@@ -609,11 +629,11 @@ def build_email_html(papers: list, summaries: list, figures_per_paper: list) -> 
             >{p['title']}</a></strong>{venue_badge}
           </p>
           <p style="margin:0 0 14px;color:#888;font-size:12px">
-            {p['authors']} · {p['published']} · 키워드: <code>{p['keyword']}</code>
+            {p['authors']} · {p['published']} · 검색 키워드: <code>{p['keyword']}</code>
           </p>
           <div style="font-size:14px;line-height:1.8;color:#333">{summary_html}</div>
           <p style="margin:10px 0 0;font-size:12px;color:#999">
-            PDF 첨부파일 포함 {fig_note}
+            PDF 첨부파일 포함{fig_note}
           </p>
         </div>"""
 
@@ -622,6 +642,7 @@ def build_email_html(papers: list, summaries: list, figures_per_paper: list) -> 
     <h2 style="color:#1a1a2e;border-bottom:3px solid #7c5cbf;padding-bottom:10px">
       arXiv 논문 다이제스트 — {date_str}
     </h2>
+    {keyword_section}
     <div style="background:#fffbea;border:1px solid #f0d080;border-radius:6px;
     padding:14px;margin-bottom:24px;font-size:14px">
       오늘의 논문 <strong>{len(papers)}편</strong>입니다 (탑티어 학회 우선 선별).<br>
@@ -725,7 +746,7 @@ def main():
             print(f"    PDF 생성 완료 (그림 {len(figures)}개 포함)")
 
         # 4. 이메일 발송
-        html = build_email_html(batch, summaries, figures_per_paper)
+        html = build_email_html(batch, summaries, figures_per_paper, state["keywords"])
         date_str = datetime.now().strftime("%m/%d")
         venue_names = list({p["venue"] for p in batch if p.get("venue")})
         venue_str = f" | {', '.join(venue_names)}" if venue_names else ""
