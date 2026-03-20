@@ -221,21 +221,84 @@ def summarize_paper(paper: dict) -> str:
     )
     return msg.content[0].text
 
+def _simple_md_to_html(text: str) -> str:
+    """이메일 본문용 간단한 마크다운 → HTML 변환.
+    수식($...$)은 텍스트로 유지, 나머지 서식만 처리."""
+    lines = text.split("\n")
+    html_parts = []
+    in_ul = False
+
+    for line in lines:
+        s = line.strip()
+
+        # 헤더 ### / ##
+        if re.match(r'^#{2,3}\s+', s):
+            if in_ul: html_parts.append("</ul>"); in_ul = False
+            content = re.sub(r'^#{2,3}\s*', '', s)
+            content = _fmt_inline(content)
+            html_parts.append(f'<p style="margin:10px 0 2px;font-weight:600;color:#1a1a2e">{content}</p>')
+
+        # 불릿
+        elif re.match(r'^[-*]\s+', s):
+            if not in_ul:
+                html_parts.append('<ul style="margin:4px 0 4px 18px;padding:0">')
+                in_ul = True
+            html_parts.append(f'<li style="margin:2px 0;line-height:1.7">{_fmt_inline(s[2:])}</li>')
+
+        # 번호 리스트 / Step N
+        elif re.match(r'^(\d+\.|Step\s*\d+)', s, re.IGNORECASE):
+            if in_ul: html_parts.append("</ul>"); in_ul = False
+            html_parts.append(f'<p style="margin:3px 0 3px 8px;line-height:1.7">{_fmt_inline(s)}</p>')
+
+        # 빈 줄
+        elif not s:
+            if in_ul: html_parts.append("</ul>"); in_ul = False
+
+        # 일반 본문
+        else:
+            if in_ul: html_parts.append("</ul>"); in_ul = False
+            html_parts.append(f'<p style="margin:4px 0;line-height:1.8">{_fmt_inline(s)}</p>')
+
+    if in_ul:
+        html_parts.append("</ul>")
+    return "\n".join(html_parts)
+
+
+def _fmt_inline(text: str) -> str:
+    """인라인 서식: bold, italic, code 처리. 수식은 코드 스타일로 표시."""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # **bold**
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    # *italic*
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    # `code`
+    text = re.sub(r'`(.+?)`',
+                  r'<code style="background:#f0eeff;padding:1px 5px;border-radius:3px;font-size:12px">\1</code>',
+                  text)
+    # $$수식$$ → 코드 스타일
+    text = re.sub(r'\$\$(.+?)\$\$',
+                  r'<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-size:12px">\1</code>',
+                  text, flags=re.DOTALL)
+    # $수식$  → 코드 스타일
+    text = re.sub(r'\$([^$\n]+?)\$',
+                  r'<code style="background:#f5f5f5;padding:1px 5px;border-radius:3px;font-size:12px">\1</code>',
+                  text)
+    return text
+
+
 def extract_goal_section(summary: str) -> str:
-    """요약 텍스트에서 '목표 Task' 섹션 내용만 추출 (이메일 본문용)."""
-    # ## 🎯 목표 Task 또는 ## 목표 Task 패턴 이후 다음 ## 전까지 추출
+    """요약 텍스트에서 '목표 Task' 섹션 내용을 HTML로 변환해서 반환."""
     match = re.search(
         r'##\s*[🎯]?\s*목표\s*Task\s*\n([\s\S]+?)(?=\n##|\Z)',
         summary, re.IGNORECASE
     )
     if match:
         content = match.group(1).strip()
-        # 너무 길면 400자로 자르고 말줄임표
-        if len(content) > 400:
-            content = content[:400].rsplit(".", 1)[0] + "..."
-        return content
-    # 섹션을 못 찾으면 첫 200자 반환
-    return summary[:200].strip() + "..."
+        # 너무 길면 600자로 자르기 (HTML 변환 전)
+        if len(content) > 600:
+            content = content[:600].rsplit(".", 1)[0] + "..."
+        return _simple_md_to_html(content)
+    return _simple_md_to_html(summary[:400].strip() + "...")
 
 
 # ── MD 파일 생성 ──────────────────────────────────────────────────────────
