@@ -550,7 +550,7 @@ def summarize_paper(paper: dict) -> str:
     )
     msg = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=1500,
+        max_tokens=4096,
         messages=[{"role": "user", "content": prompt}],
     )
     return msg.content[0].text
@@ -651,32 +651,70 @@ def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str)
     pending_body = []
     pending_blt  = []
 
+    def md_to_rl(text: str) -> str:
+        """마크다운 인라인 요소를 ReportLab XML 태그로 변환."""
+        # **bold** → <b>bold</b>
+        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        # *italic* → <i>italic</i>
+        text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+        # `code` → <font name="Courier">code</font>
+        text = re.sub(r'`(.+?)`', r'<font name="Courier">\1</font>', text)
+        # XML 특수문자 이스케이프 (태그 변환 후)
+        # & 는 태그 밖에 있는 것만 이스케이프 (태그 내부 제외)
+        text = re.sub(r'&(?!amp;|lt;|gt;|quot;)', '&amp;', text)
+        return text
+
     def flush():
         for ln in pending_body:
-            story.append(Paragraph(ln, style_body))
+            story.append(Paragraph(md_to_rl(ln), style_body))
         for bl in pending_blt:
-            story.append(Paragraph(f"• {bl}", style_blt))
+            story.append(Paragraph(f"• {md_to_rl(bl)}", style_blt))
         pending_body.clear()
         pending_blt.clear()
 
     for line in summary.split("\n"):
         line = line.strip()
-        if line.startswith("## "):
+
+        # 섹션 헤더: ## 또는 ###
+        if re.match(r'^#{1,3}\s+', line):
             flush()
-            header = re.sub(r'^##\s*', '', line).strip()
+            header = re.sub(r'^#{1,3}\s*', '', line).strip()
             story.append(KeepTogether([
                 HRFlowable(width="100%", thickness=0.5,
                            color=colors.HexColor("#dddddd"), spaceBefore=8),
-                Paragraph(f"<b>{header}</b>", style_sec),
+                Paragraph(f"<b>{md_to_rl(header)}</b>", style_sec),
             ]))
-        elif line.startswith("- ") or line.startswith("* "):
+
+        # 불릿 리스트: - 또는 *
+        elif re.match(r'^[-*]\s+', line):
             if pending_body:
                 flush()
             pending_blt.append(line[2:])
+
+        # 번호 리스트: 1. 2. 또는 Step 1. Step 2.
+        elif re.match(r'^(\d+\.|Step\s+\d+[:\.]?)\s+', line, re.IGNORECASE):
+            if pending_body:
+                flush()
+            # 번호/Step 접두사 유지하되 들여쓰기 적용
+            story.append(Paragraph(md_to_rl(line), style_blt))
+
+        # **로 시작하는 bold 강조 단락 (소제목 역할)
+        elif line.startswith("**") and line.endswith("**"):
+            flush()
+            bold_text = line.strip("*")
+            story.append(Paragraph(f"<b>{md_to_rl(bold_text)}</b>", style_body))
+
+        # 일반 본문
         elif line:
             if pending_blt:
                 flush()
             pending_body.append(line)
+
+        # 빈 줄 — 문단 구분
+        else:
+            if pending_body or pending_blt:
+                flush()
+                story.append(Spacer(1, 2*mm))
 
     flush()
 
@@ -689,6 +727,96 @@ def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str)
     ))
 
     doc.build(story)
+
+
+# ── 마크다운 → HTML 변환 ──────────────────────────────────────────────────
+
+def _md_to_html(text: str) -> str:
+    """요약 마크다운을 이메일용 HTML로 변환."""
+    lines = text.split("\n")
+    html_parts = []
+    in_list = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 섹션 헤더 ## / ###
+        if re.match(r'^#{1,3}\s+', stripped):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            header = re.sub(r'^#{1,3}\s*', '', stripped)
+            header = _inline_md(header)
+            html_parts.append(
+                f'<p style="margin:16px 0 4px;font-size:14px;font-weight:bold;'
+                f'color:#1a1a2e;border-bottom:1px solid #e0d8f5;padding-bottom:3px">'
+                f'{header}</p>'
+            )
+
+        # 불릿 리스트
+        elif re.match(r'^[-*]\s+', stripped):
+            if not in_list:
+                html_parts.append('<ul style="margin:4px 0 4px 16px;padding:0">')
+                in_list = True
+            content = _inline_md(stripped[2:])
+            html_parts.append(f'<li style="margin:2px 0;line-height:1.7">{content}</li>')
+
+        # 번호 리스트 / Step N
+        elif re.match(r'^(\d+\.|Step\s+\d+[:\.]?)\s+', stripped, re.IGNORECASE):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            content = _inline_md(stripped)
+            html_parts.append(
+                f'<p style="margin:4px 0 4px 8px;line-height:1.7;color:#333">{content}</p>'
+            )
+
+        # **bold** 단독 줄 (소제목)
+        elif stripped.startswith("**") and stripped.endswith("**"):
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            bold_text = _inline_md(stripped)
+            html_parts.append(
+                f'<p style="margin:8px 0 2px;font-weight:bold;color:#333">{bold_text}</p>'
+            )
+
+        # 빈 줄
+        elif not stripped:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+
+        # 일반 본문
+        else:
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
+            content = _inline_md(stripped)
+            html_parts.append(f'<p style="margin:4px 0;line-height:1.8;color:#333">{content}</p>')
+
+    if in_list:
+        html_parts.append("</ul>")
+
+    return "\n".join(html_parts)
+
+
+def _inline_md(text: str) -> str:
+    """인라인 마크다운(bold, italic, code)을 HTML로 변환."""
+    # & 이스케이프 먼저
+    text = text.replace("&", "&amp;")
+    # **bold**
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    # *italic*
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    # `code`
+    text = re.sub(
+        r'`(.+?)`',
+        r'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px;'
+        r'font-size:12px">\1</code>',
+        text
+    )
+    return text
 
 
 # ── 이메일 ────────────────────────────────────────────────────────────────
@@ -729,12 +857,7 @@ def build_email_html(papers: list, summaries: list, figures_per_paper: list, key
             f'<span style="color:#2a9d8f;font-size:12px"> · 핵심 그림 {len(figs)}개 포함</span>'
             if figs else ""
         )
-        summary_html = (
-            s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-             .replace("\n## ", "<br><br><strong>")
-             .replace("\n- ", "<br>• ")
-             .replace("\n", "<br>")
-        )
+        summary_html = _md_to_html(s)
         items += f"""
         <div style="background:#f8f9fa;border-left:4px solid #7c5cbf;
                     padding:18px;margin:20px 0;border-radius:6px;">
