@@ -1,7 +1,7 @@
 name: Process Feedback
 
 on:
-  # 매일 오전 9시에 한 번 실행 — 내부에서 5분마다 폴링, 최대 12시간 대기
+  # daily_digest와 같은 시각 실행 — 발송 후 즉시 폴링 시작
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # 최대 12시간 실행 허용 (기본 6시간)
     timeout-minutes: 720
 
     steps:
@@ -24,18 +23,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y fonts-nanum
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Process feedback (polling loop)
         run: python process_feedback.py
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS }}
-          # 5분마다 체크, 피드백 오면 즉시 처리 후 종료
+          TO_EMAIL: ${{ secrets.TO_EMAIL }}
           POLL_INTERVAL_SECONDS: "300"
-          # 피드백 없이 이 시간 지나면 종료 (초, 기본 43200 = 12시간)
           POLL_TIMEOUT_SECONDS: "43200"

@@ -182,7 +182,16 @@ def process_once(state: dict, service) -> bool:
 
     save_state(state)
     commit_state()
-    print(f"완료 — 업데이트된 키워드: {state['keywords']}")
+    print(f"키워드 업데이트 완료: {state['keywords']}")
+
+    # 피드백 처리 직후 바로 다음 배치 발송
+    print("다음 배치 발송 시작...")
+    import importlib.util, sys
+    spec = importlib.util.spec_from_file_location("arxiv_digest", "arxiv_digest.py")
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.main()
+
     return True
 
 
