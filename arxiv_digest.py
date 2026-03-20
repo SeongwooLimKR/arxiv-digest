@@ -1,4 +1,4 @@
-import os, json, smtplib, feedparser, requests, re, tempfile, io, time
+import os, json, smtplib, feedparser, requests, re, tempfile, io, time, base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -652,23 +652,67 @@ def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str)
     pending_blt  = []
 
     def md_to_rl(text: str) -> str:
-        """마크다운 인라인 요소를 ReportLab XML 태그로 변환."""
-        # **bold** → <b>bold</b>
+        """마크다운 인라인 요소를 ReportLab XML 태그로 변환. 수식은 이미지 경로 반환 불가라 태그로 표시."""
         text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        # *italic* → <i>italic</i>
         text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-        # `code` → <font name="Courier">code</font>
         text = re.sub(r'`(.+?)`', r'<font name="Courier">\1</font>', text)
-        # XML 특수문자 이스케이프 (태그 변환 후)
-        # & 는 태그 밖에 있는 것만 이스케이프 (태그 내부 제외)
         text = re.sub(r'&(?!amp;|lt;|gt;|quot;)', '&amp;', text)
+        # 수식은 $...$ 형태로 유지 (inline image는 flush_with_math에서 처리)
         return text
+
+    def make_math_image(latex: str, is_display: bool, tmpdir_math: str) -> str | None:
+        """수식 PNG를 tmpdir에 저장하고 경로 반환."""
+        png = _render_latex_to_png(latex, fontsize=11, is_display=is_display)
+        if not png:
+            return None
+        safe = re.sub(r'[^\w]', '_', latex[:20])
+        path = os.path.join(tmpdir_math, f"math_{safe}_{id(latex)}.png")
+        with open(path, "wb") as f:
+            f.write(png)
+        return path
+
+    def flush_line_with_math(line: str, style, math_tmpdir: str):
+        """한 줄을 텍스트+수식 이미지 혼합으로 story에 추가."""
+        parts = _split_with_math(line)
+        # 수식이 없으면 그냥 Paragraph
+        has_math = any(p["type"] != "text" for p in parts)
+        if not has_math:
+            story.append(Paragraph(md_to_rl(line), style))
+            return
+        # 수식 있으면: 텍스트 파트는 Paragraph, 수식 파트는 RLImage로 인라인 배치
+        # ReportLab은 진정한 인라인 이미지가 어려우므로
+        # 수식이 있는 줄은 텍스트→수식→텍스트 순으로 개별 flowable 삽입
+        for part in parts:
+            if part["type"] == "text" and part["content"].strip():
+                story.append(Paragraph(md_to_rl(part["content"].strip()), style))
+            elif part["type"] in ("inline_math", "display_math"):
+                is_disp = part["type"] == "display_math"
+                img_path = make_math_image(part["content"], is_disp, math_tmpdir)
+                if img_path:
+                    try:
+                        from PIL import Image as PILImage
+                        with PILImage.open(img_path) as im:
+                            w_px, h_px = im.size
+                        # 72dpi 기준으로 pt 변환, 최대 PAGE_W
+                        scale = min(PAGE_W / (w_px / 72 * 72), 1.0)
+                        story.append(RLImage(img_path,
+                                             width=w_px / 96 * 72 * scale,
+                                             height=h_px / 96 * 72 * scale))
+                    except Exception:
+                        story.append(Paragraph(
+                            f'<font name="Courier">${part["content"]}$</font>', style))
+                else:
+                    story.append(Paragraph(
+                        f'<font name="Courier">${part["content"]}$</font>', style))
+
+    import tempfile as _tf
+    math_tmpdir = _tf.mkdtemp()
 
     def flush():
         for ln in pending_body:
-            story.append(Paragraph(md_to_rl(ln), style_body))
+            flush_line_with_math(ln, style_body, math_tmpdir)
         for bl in pending_blt:
-            story.append(Paragraph(f"• {md_to_rl(bl)}", style_blt))
+            flush_line_with_math(f"• {bl}", style_blt, math_tmpdir)
         pending_body.clear()
         pending_blt.clear()
 
@@ -727,6 +771,74 @@ def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str)
     ))
 
     doc.build(story)
+
+
+# ── 수식 렌더링 (matplotlib LaTeX → PNG) ────────────────────────────────
+
+def _render_latex_to_png(latex: str, fontsize: int = 13, is_display: bool = False) -> bytes | None:
+    """LaTeX 수식을 PNG bytes로 렌더링. 실패 시 None 반환."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        # display 수식은 더 크게
+        fig_fontsize = fontsize + 2 if is_display else fontsize
+        fig, ax = plt.subplots(figsize=(0.01, 0.01))
+        ax.axis("off")
+
+        # 수식 렌더링 (dollar sign 없이 전달)
+        text = ax.text(
+            0.5, 0.5,
+            f"${latex}$",
+            fontsize=fig_fontsize,
+            ha="center", va="center",
+            transform=fig.transFigure,
+        )
+
+        # 텍스트 bbox 기준으로 figure 크기 자동 조정
+        fig.canvas.draw()
+        bbox = text.get_window_extent(renderer=fig.canvas.get_renderer())
+        dpi = fig.get_dpi()
+        pad = 4  # px padding
+        fig.set_size_inches(
+            (bbox.width + pad * 2) / dpi,
+            (bbox.height + pad * 2) / dpi,
+        )
+        ax.set_position([0, 0, 1, 1])
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=dpi,
+                    bbox_inches="tight", pad_inches=pad / dpi,
+                    transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        print(f"    수식 렌더링 실패 ({latex[:30]}...): {e}")
+        return None
+
+
+def _split_with_math(text: str) -> list:
+    """텍스트를 일반 텍스트 / 인라인 수식($...$) / 디스플레이 수식($$...$$) 으로 분리.
+    반환: [{"type": "text"|"inline_math"|"display_math", "content": str}, ...]
+    """
+    parts = []
+    # $$...$$ 먼저 ($$가 $ 보다 길어서 먼저 처리)
+    pattern = re.compile(r'(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)')
+    pos = 0
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            parts.append({"type": "text", "content": text[pos:m.start()]})
+        raw = m.group(0)
+        if raw.startswith("$$"):
+            parts.append({"type": "display_math", "content": raw[2:-2].strip()})
+        else:
+            parts.append({"type": "inline_math", "content": raw[1:-1].strip()})
+        pos = m.end()
+    if pos < len(text):
+        parts.append({"type": "text", "content": text[pos:]})
+    return parts
 
 
 # ── 마크다운 → HTML 변환 ──────────────────────────────────────────────────
@@ -802,21 +914,41 @@ def _md_to_html(text: str) -> str:
 
 
 def _inline_md(text: str) -> str:
-    """인라인 마크다운(bold, italic, code)을 HTML로 변환."""
-    # & 이스케이프 먼저
-    text = text.replace("&", "&amp;")
-    # **bold**
-    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
-    # *italic*
-    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
-    # `code`
-    text = re.sub(
-        r'`(.+?)`',
-        r'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px;'
-        r'font-size:12px">\1</code>',
-        text
-    )
-    return text
+    """인라인 마크다운(bold, italic, code, 수식)을 HTML로 변환."""
+    # 수식 먼저 처리 (이미지로 치환)
+    parts = _split_with_math(text)
+    result = []
+    for part in parts:
+        if part["type"] == "text":
+            t = part["content"]
+            t = t.replace("&", "&amp;")
+            t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
+            t = re.sub(r'\*(.+?)\*', r'<em>\1</em>', t)
+            t = re.sub(
+                r'`(.+?)`',
+                r'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px;'
+                r'font-size:12px">\1</code>',
+                t
+            )
+            result.append(t)
+        elif part["type"] in ("inline_math", "display_math"):
+            is_display = part["type"] == "display_math"
+            png = _render_latex_to_png(part["content"], fontsize=12, is_display=is_display)
+            if png:
+                b64 = base64.b64encode(png).decode()
+                align = "display:block;margin:6px auto" if is_display else "vertical-align:middle"
+                result.append(
+                    f'<img src="data:image/png;base64,{b64}" '
+                    f'style="{align};max-width:100%" alt="{part["content"][:30]}">'
+                )
+            else:
+                # 렌더링 실패 시 텍스트 폴백
+                delim = "$$" if is_display else "$"
+                result.append(
+                    f'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px">'
+                    f'{delim}{part["content"]}{delim}</code>'
+                )
+    return "".join(result)
 
 
 # ── 이메일 ────────────────────────────────────────────────────────────────
