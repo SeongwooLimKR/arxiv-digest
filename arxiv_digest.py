@@ -1,4 +1,4 @@
-import os, json, smtplib, feedparser, requests, re, tempfile, io, time, base64
+import os, json, smtplib, requests, re, time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -7,101 +7,54 @@ from datetime import datetime
 from pathlib import Path
 import anthropic
 
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
-    KeepTogether, Image as RLImage,
-)
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── 탑티어 학회 목록 ──────────────────────────────────────────────────────
 TOP_VENUES = {
-    # AI/ML 일반
     "NeurIPS", "ICML", "ICLR", "AAAI", "IJCAI", "AISTATS", "UAI", "ECML",
-    # NLP
     "ACL", "EMNLP", "NAACL", "COLING", "EACL", "CoNLL",
-    # Computer Vision
     "CVPR", "ICCV", "ECCV", "WACV", "BMVC",
-    # Multimodal / Speech
     "ICASSP", "Interspeech",
-    # Robotics
     "ICRA", "IROS", "RSS", "CoRL",
-    # Data Mining / IR / Web
     "KDD", "WWW", "SIGIR", "WSDM", "RecSys", "CIKM",
-    # Systems / LLM 인프라
     "MLSys", "OSDI", "SOSP", "EuroSys",
-    # 저널
     "JMLR", "TACL", "TMLR", "TPAMI", "IJCV", "Nature", "Science",
 }
 
-# ── 그림 선별 기준 ────────────────────────────────────────────────────────
-# 최소 크기 (너무 작은 아이콘·로고 제외)
-MIN_IMG_WIDTH  = 100   # px
-MIN_IMG_HEIGHT = 80    # px
-# 논문당 최대 선별 그림 수
-MAX_FIGURES_PER_PAPER = 3
-
-# ── 그림 선별 프롬프트 (캡션 + 본문 언급 맥락 활용) ─────────────────────
-FIGURE_FILTER_PROMPT = """다음은 AI/ML 논문에서 추출한 그림 정보야.
-각 항목에는 캡션(Figure 아래 설명)과 본문에서 해당 그림을 언급한 문장들이 있어.
-이 두 가지를 함께 보고, 각 그림이 논문의 방법론이나 핵심 개념 이해에 핵심적으로 도움이 되는지 판단해줘.
-
-선택 기준:
-- 포함: 모델 아키텍처, 전체 파이프라인, 핵심 알고리즘 흐름, 주요 실험 결과 비교 그래프/표
-- 제외: 단순 예시 이미지, 동기 부여용 배경 설명, 세부 ablation 결과, 데이터셋 샘플 이미지
-
-판단 팁:
-- 본문에서 "Figure N shows our proposed ...", "As shown in Figure N, the model ..." 처럼
-  제안 방법을 직접 설명할 때 언급되면 핵심 그림일 가능성이 높음
-- 본문 언급 횟수가 많을수록 중요한 그림
-
-그림 정보:
-{figure_info}
-
-아래 JSON만 반환해줘. 설명 없이 JSON만.
-{{"selected": [포함할 그림의 인덱스(0부터 시작) 배열]}}
-
-최대 {max_count}개만 선택. 핵심적인 것이 없으면 빈 배열 반환."""
-
-# ── 논문 요약 프롬프트 ────────────────────────────────────────────────────
+# ── 요약 프롬프트 ─────────────────────────────────────────────────────────
 SUMMARY_PROMPT = """학술 논문을 구조적으로 분석하여 핵심 내용을 한국어로 정리해줘.
 모델명·데이터셋명·평가 지표·알고리즘명 등 전문 용어는 영어 원문 유지.
 한국어로 번역 시 의미가 불명확한 개념은 한국어(영어) 형식으로 병기.
+수식은 LaTeX 형식($...$, $$...$$)으로 그대로 작성해줘. 표는 마크다운 표 형식으로 작성해줘.
 
 아래 7개 섹션을 순서대로 작성해:
 
-## 목표 Task
+## 🎯 목표 Task
 이 논문이 풀고자 하는 문제와 왜 중요한지(motivation)를 서술.
 
-## 기존 연구의 접근 방법
+## 🔍 기존 연구의 접근 방법
 기존 방법론들의 핵심 아이디어를 한 줄씩 나열하고, 공통 한계를 정리.
 
-## 배경지식
+## 📚 배경지식
 이 논문 이해에 필요한 사전 개념 설명. 불필요하면 섹션 생략.
 
-## 제안 방법의 차별점
+## ✨ 제안 방법의 차별점
 "기존에는 X였는데, 이 논문은 Y를 한다" 형식으로 대비해서 서술.
 
-## 제안 방법의 구체적인 내용
+## 🛠️ 제안 방법의 구체적인 내용
 Step-by-step으로 상세히 설명. 압축하지 말고 각 단계를 충분히 풀어서 서술.
 - Step 1, Step 2, ... 형식으로 번호를 붙여 순서대로 설명
 - 각 Step마다: 무엇을 하는지(목적) / 어떻게 하는지(구체적 방법, 수식) / 왜 이렇게 하는지(직관적 이유) 포함
 - 모델 구조는 입력->처리->출력 흐름으로 추적
-- 핵심 수식이 있으면 수식과 각 기호의 의미를 설명
+- 핵심 수식이 있으면 LaTeX로 작성하고 각 기호의 의미를 설명
 - 독자가 이 섹션만 읽어도 방법론을 직접 구현할 수 있는 수준 목표
 
-## 실험
+## 🧪 실험
 - 데이터셋: 어떤 데이터로 실험했는지
 - 평가 지표: 어떤 metric으로 측정했는지
-- 성능 결과: 기존 방법 대비 수치 포함해서 서술
+- 성능 결과: 기존 방법 대비 수치 포함 (가능하면 마크다운 표로)
 
-## 비판적 분석
+## 🔴 비판적 분석
 균형 있는 시각으로 구체적 이유와 함께 서술:
 - 실험의 한계 (설계, 데이터셋, 비교 대상)
 - 방법론의 한계 (가정, 일반화, 계산 비용)
@@ -113,6 +66,15 @@ Step-by-step으로 상세히 설명. 압축하지 말고 각 단계를 충분히
 ---
 논문 제목: {title}
 저자: {authors}
+초록: {abstract}"""
+
+# ── 한 줄 요약 프롬프트 (이메일 본문용) ──────────────────────────────────
+ONE_LINE_PROMPT = """다음 논문을 한국어로 두 문장으로 요약해줘.
+첫 문장: 이 논문이 해결하는 문제와 핵심 아이디어.
+두 번째 문장: 주요 결과나 의의.
+두 문장만 출력하고 다른 설명은 하지 마.
+
+제목: {title}
 초록: {abstract}"""
 
 
@@ -127,30 +89,24 @@ def save_state(state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-# ── 논문 수집 ─────────────────────────────────────────────────────────────
+# ── Semantic Scholar 논문 수집 ────────────────────────────────────────────
 
-SS_FIELDS = "title,authors,abstract,year,venue,publicationVenue,externalIds,referenceCount,citationCount"
+SS_FIELDS = "title,authors,abstract,year,venue,publicationVenue,externalIds"
 SS_BASE   = "https://api.semanticscholar.org/graph/v1"
 
-
-def _ss_paper_to_dict(data: dict, source: str) -> dict | None:
-    """Semantic Scholar 응답을 내부 paper dict으로 변환."""
+def _ss_to_paper(data: dict, source: str) -> dict | None:
     ext = data.get("externalIds") or {}
     arxiv_id = ext.get("ArXiv")
     if not arxiv_id:
         return None
-
     authors = data.get("authors") or []
-    author_str = ", ".join(a.get("name", "") for a in authors[:3])
-
     venue = data.get("venue", "") or ""
     pub_venue = data.get("publicationVenue") or {}
     venue_name = pub_venue.get("name", venue) or venue
-
     return {
         "id": arxiv_id,
         "title": (data.get("title") or "").replace("\n", " ").strip(),
-        "authors": author_str,
+        "authors": ", ".join(a.get("name", "") for a in authors[:3]),
         "abstract": (data.get("abstract") or "")[:1500],
         "url": f"https://arxiv.org/abs/{arxiv_id}",
         "published": str(data.get("year") or ""),
@@ -159,53 +115,42 @@ def _ss_paper_to_dict(data: dict, source: str) -> dict | None:
         "venue_year": data.get("year"),
     }
 
-
 def fetch_seed_papers(seed_ids: list, exclude_ids: set) -> list:
-    """시드 논문 자체를 가져옴 (아직 보내지 않은 것만)."""
     papers = []
     for arxiv_id in seed_ids:
-        clean_id = arxiv_id.split("v")[0].strip()
-        if clean_id in exclude_ids:
+        cid = arxiv_id.split("v")[0].strip()
+        if cid in exclude_ids:
             continue
         try:
-            url  = f"{SS_BASE}/paper/arXiv:{clean_id}"
-            resp = requests.get(url, params={"fields": SS_FIELDS}, timeout=10)
-            if resp.status_code != 200:
-                continue
-            p = _ss_paper_to_dict(resp.json(), source="시드 논문")
-            if p:
-                papers.append(p)
-                exclude_ids.add(clean_id)
+            resp = requests.get(f"{SS_BASE}/paper/arXiv:{cid}",
+                                params={"fields": SS_FIELDS}, timeout=10)
+            if resp.status_code == 200:
+                p = _ss_to_paper(resp.json(), "시드 논문")
+                if p:
+                    papers.append(p)
+                    exclude_ids.add(cid)
             time.sleep(0.3)
         except Exception:
             continue
     return papers
 
-
 def fetch_citing_papers(seed_ids: list, exclude_ids: set, max_per_seed: int = 5) -> list:
-    """시드 논문들을 인용한 최신 논문 수집."""
     papers = []
     for arxiv_id in seed_ids:
-        clean_id = arxiv_id.split("v")[0].strip()
+        cid = arxiv_id.split("v")[0].strip()
         try:
-            url  = f"{SS_BASE}/paper/arXiv:{clean_id}/citations"
-            resp = requests.get(url, params={
-                "fields": SS_FIELDS,
-                "limit": 50,
-            }, timeout=10)
+            resp = requests.get(f"{SS_BASE}/paper/arXiv:{cid}/citations",
+                                params={"fields": SS_FIELDS, "limit": 50}, timeout=10)
             if resp.status_code != 200:
                 continue
-            data = resp.json()
-            count = 0
-            # 최신순 정렬 (year 내림차순)
             citations = sorted(
-                data.get("data", []),
+                resp.json().get("data", []),
                 key=lambda x: x.get("citingPaper", {}).get("year") or 0,
                 reverse=True,
             )
+            count = 0
             for item in citations:
-                citing = item.get("citingPaper", {})
-                p = _ss_paper_to_dict(citing, source=f"인용 (arXiv:{clean_id})")
+                p = _ss_to_paper(item.get("citingPaper", {}), f"인용 (arXiv:{cid})")
                 if p and p["id"] not in exclude_ids:
                     papers.append(p)
                     exclude_ids.add(p["id"])
@@ -217,24 +162,18 @@ def fetch_citing_papers(seed_ids: list, exclude_ids: set, max_per_seed: int = 5)
             continue
     return papers
 
-
-def fetch_keyword_papers_ss(keywords: list, exclude_ids: set, max_per_kw: int = 10) -> list:
-    """Semantic Scholar 키워드 검색으로 논문 수집."""
+def fetch_keyword_papers(keywords: list, exclude_ids: set, max_per_kw: int = 10) -> list:
     papers = []
     for kw in keywords:
         try:
-            url  = f"{SS_BASE}/paper/search"
-            resp = requests.get(url, params={
-                "query": kw,
-                "fields": SS_FIELDS,
-                "limit": max_per_kw * 2,  # 필터링 여유분
-            }, timeout=10)
+            resp = requests.get(f"{SS_BASE}/paper/search",
+                                params={"query": kw, "fields": SS_FIELDS,
+                                        "limit": max_per_kw * 2}, timeout=10)
             if resp.status_code != 200:
                 continue
-            data = resp.json()
             count = 0
-            for item in data.get("data", []):
-                p = _ss_paper_to_dict(item, source=kw)
+            for item in resp.json().get("data", []):
+                p = _ss_to_paper(item, kw)
                 if p and p["id"] not in exclude_ids:
                     papers.append(p)
                     exclude_ids.add(p["id"])
@@ -246,55 +185,29 @@ def fetch_keyword_papers_ss(keywords: list, exclude_ids: set, max_per_kw: int = 
             continue
     return papers
 
-
 def fetch_all_papers(state: dict) -> list:
-    """시드 논문 + 인용 논문 + 키워드 검색을 병행해서 후보 논문 수집."""
     exclude_ids = set(p.split("v")[0] for p in state.get("sent_papers", []))
     seed_ids    = state.get("seed_papers", [])
     keywords    = state.get("keywords", [])
+    all_papers  = []
 
-    all_papers = []
-
-    # 1. 아직 안 보낸 시드 논문 포함
     if seed_ids:
         seeds = fetch_seed_papers(seed_ids, exclude_ids)
         print(f"  시드 논문: {len(seeds)}편")
         all_papers.extend(seeds)
 
-    # 2. 시드 논문을 인용한 최신 논문
     if seed_ids:
         citing = fetch_citing_papers(seed_ids, exclude_ids, max_per_seed=5)
         print(f"  인용 논문: {len(citing)}편")
         all_papers.extend(citing)
 
-    # 3. Semantic Scholar 키워드 검색
     if keywords:
-        kw_papers = fetch_keyword_papers_ss(keywords, exclude_ids, max_per_kw=8)
+        kw_papers = fetch_keyword_papers(keywords, exclude_ids, max_per_kw=8)
         print(f"  키워드 검색: {len(kw_papers)}편")
         all_papers.extend(kw_papers)
 
     print(f"  총 후보: {len(all_papers)}편")
     return all_papers
-
-
-# ── 학회 필터링 ───────────────────────────────────────────────────────────
-
-def get_venue_from_semantic_scholar(paper: dict) -> dict:
-    try:
-        arxiv_id = paper["id"].split("v")[0]
-        url = f"https://api.semanticscholar.org/graph/v1/paper/arXiv:{arxiv_id}"
-        resp = requests.get(url, params={"fields": "venue,publicationVenue,year"}, timeout=8)
-        if resp.status_code != 200:
-            return paper
-        data = resp.json()
-        venue = data.get("venue", "") or ""
-        pub_venue = data.get("publicationVenue") or {}
-        venue_name = pub_venue.get("name", venue) or venue
-        paper["venue"] = venue_name.strip() if venue_name else None
-        paper["venue_year"] = data.get("year")
-    except Exception:
-        pass
-    return paper
 
 def is_top_venue(venue: str) -> bool:
     if not venue:
@@ -302,748 +215,151 @@ def is_top_venue(venue: str) -> bool:
     v = venue.upper()
     return any(top.upper() in v for top in TOP_VENUES)
 
-def enrich_and_filter_papers(papers: list, require_venue: bool = True) -> list:
-    print(f"  {len(papers)}편 학회 정보 조회 중...")
-    enriched = []
-    for p in papers:
-        p = get_venue_from_semantic_scholar(p)
-        if is_top_venue(p.get("venue", "")):
-            enriched.append(p)
-        elif not require_venue and not p.get("venue"):
-            enriched.append(p)
-    print(f"  탑티어 학회 논문: {len(enriched)}편")
-    return enriched
-
-
-# ── 그림 추출 및 선별 ─────────────────────────────────────────────────────
-
-def download_arxiv_pdf(arxiv_id: str, dest_path: str) -> bool:
-    """arXiv PDF 다운로드. 성공 시 True."""
-    pid = arxiv_id.split("v")[0]
-    url = f"https://arxiv.org/pdf/{pid}.pdf"
-    try:
-        resp = requests.get(url, timeout=30, stream=True)
-        if resp.status_code != 200:
-            return False
-        with open(dest_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    except Exception:
-        return False
-
-
-def extract_figures_with_captions(pdf_path: str) -> list:
-    """pymupdf로 PDF에서 그림 + 캡션 + 본문 언급 문장을 추출.
-    반환: [{
-        "index": int, "caption": str, "body_mentions": [str, ...],
-        "image_bytes": bytes, "ext": str, "width": int, "height": int
-    }, ...]
-    """
-    try:
-        import fitz  # pymupdf
-    except ImportError:
-        print("  pymupdf 없음 — 그림 추출 건너뜀")
-        return []
-
-    results = []
-    try:
-        doc = fitz.open(pdf_path)
-    except Exception:
-        return []
-
-    # 전체 텍스트 페이지별 수집
-    page_texts = []
-    for page in doc:
-        page_texts.append(page.get_text("text"))
-
-    # 전체 본문 텍스트 (본문 언급 검색용)
-    full_text = "\n".join(page_texts)
-
-    fig_index = 0
-    for page_num, page in enumerate(doc):
-        page_text = page_texts[page_num]
-
-        img_list = page.get_images(full=True)
-        for img_info in img_list:
-            xref = img_info[0]
-            try:
-                base_image = doc.extract_image(xref)
-            except Exception:
-                continue
-
-            w, h = base_image["width"], base_image["height"]
-            if w < MIN_IMG_WIDTH or h < MIN_IMG_HEIGHT:
-                continue
-            ratio = w / h if h > 0 else 0
-            if ratio > 10 or ratio < 0.1:
-                continue
-
-            fig_num = fig_index + 1
-
-            # 1. 캡션 추출 (그림 바로 아래 설명)
-            caption = _find_caption_for_figure(page_text, fig_num)
-
-            # 2. 본문 언급 문장 추출 (캡션 외 본문에서 해당 Figure를 인용한 문장들)
-            body_mentions = _find_body_mentions(full_text, fig_num, caption)
-
-            results.append({
-                "index": fig_index,
-                "caption": caption,
-                "body_mentions": body_mentions,
-                "image_bytes": base_image["image"],
-                "ext": base_image["ext"],
-                "width": w,
-                "height": h,
-            })
-            fig_index += 1
-
-    doc.close()
-    return results
-
-
-def _find_caption_for_figure(page_text: str, fig_num: int) -> str:
-    """페이지 텍스트에서 Figure N 캡션 추출."""
-    patterns = [
-        rf"Figure\s+{fig_num}[:\.]?\s*(.{{10,300}})",
-        rf"Fig\.\s*{fig_num}[:\.]?\s*(.{{10,300}})",
-        rf"Fig\s+{fig_num}[:\.]?\s*(.{{10,300}})",
-        rf"FIGURE\s+{fig_num}[:\.]?\s*(.{{10,300}})",
-    ]
-    for pat in patterns:
-        m = re.search(pat, page_text, re.IGNORECASE | re.DOTALL)
-        if m:
-            caption = re.sub(r'\s+', ' ', m.group(1).strip())[:200]
-            return caption
-    return ""
-
-
-def _find_body_mentions(full_text: str, fig_num: int, caption: str) -> list:
-    """전체 본문에서 Figure N을 언급하는 문장을 추출.
-    캡션 자체는 제외하고, 본문에서 인용되는 문장만 수집.
-    최대 4문장 반환.
-    """
-    # Figure N 언급 패턴 (괄호 포함: (Figure 3), (Fig. 3) 등)
-    patterns = [
-        rf"[^.]*(?:Figure|Fig\.?)\s+{fig_num}[^.]*\.",
-        rf"[^.]*\((?:Figure|Fig\.?)\s+{fig_num}\)[^.]*\.",
-    ]
-
-    mentions = []
-    seen = set()
-    for pat in patterns:
-        for m in re.finditer(pat, full_text, re.IGNORECASE):
-            sentence = re.sub(r'\s+', ' ', m.group(0).strip())
-            # 캡션 자체와 중복 제거
-            if caption and caption[:40] in sentence:
-                continue
-            # 너무 짧거나 이미 수집한 문장 제외
-            if len(sentence) < 20 or sentence in seen:
-                continue
-            seen.add(sentence)
-            mentions.append(sentence[:200])
-            if len(mentions) >= 4:
-                break
-        if len(mentions) >= 4:
-            break
-
-    return mentions
-
-
-def select_key_figures(figures: list, max_count: int = MAX_FIGURES_PER_PAPER) -> list:
-    """캡션 + 본문 언급 맥락을 Claude에게 보내서 핵심 그림 선별."""
-    if not figures:
-        return []
-
-    # 캡션이나 본문 언급이 하나라도 있는 것만 후보로
-    candidates = [f for f in figures if f.get("caption") or f.get("body_mentions")]
-    if not candidates:
-        # 둘 다 없으면 크기 기준 상위 max_count개 반환
-        return sorted(figures, key=lambda x: x["width"] * x["height"], reverse=True)[:max_count]
-
-    # 각 그림의 캡션 + 본문 언급을 구조화해서 전달
-    figure_info_parts = []
-    for i, f in enumerate(candidates):
-        parts = [f"[그림 {i}]"]
-
-        if f.get("caption"):
-            parts.append(f"  캡션: {f['caption']}")
-        else:
-            parts.append("  캡션: 없음")
-
-        mentions = f.get("body_mentions", [])
-        if mentions:
-            parts.append(f"  본문 언급 ({len(mentions)}회):")
-            for m in mentions:
-                parts.append(f"    - {m}")
-        else:
-            parts.append("  본문 언급: 없음")
-
-        figure_info_parts.append("\n".join(parts))
-
-    figure_info_text = "\n\n".join(figure_info_parts)
-
-    prompt = FIGURE_FILTER_PROMPT.format(
-        figure_info=figure_info_text,
-        max_count=max_count,
-    )
-
-    try:
-        msg = client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = msg.content[0].text.strip()
-        if "```" in raw:
-            raw = raw.split("```")[1].replace("json", "").strip()
-        result = json.loads(raw)
-        selected_indices = result.get("selected", [])
-        return [candidates[i] for i in selected_indices if i < len(candidates)]
-    except Exception as e:
-        print(f"  그림 선별 오류: {e} — 크기 기준으로 폴백")
-        return sorted(candidates, key=lambda x: x["width"] * x["height"], reverse=True)[:max_count]
-
-
-def get_key_figures(paper: dict, tmpdir: str) -> list:
-    """PDF 다운로드 → 그림 추출 → 캡션 기반 선별 → 선별된 그림 반환."""
-    pdf_path = os.path.join(tmpdir, f"{paper['id'].replace('/', '_')}.pdf")
-
-    print(f"    PDF 다운로드 중...")
-    if not download_arxiv_pdf(paper["id"], pdf_path):
-        print(f"    PDF 다운로드 실패 — 그림 없이 진행")
-        return []
-
-    figures = extract_figures_with_captions(pdf_path)
-    print(f"    그림 {len(figures)}개 발견")
-
-    if not figures:
-        return []
-
-    selected = select_key_figures(figures, MAX_FIGURES_PER_PAPER)
-    print(f"    핵심 그림 {len(selected)}개 선별됨")
-
-    # 선별된 그림을 tmpdir에 이미지 파일로 저장
-    saved = []
-    for i, fig in enumerate(selected):
-        ext = fig["ext"] if fig["ext"] in ("png", "jpeg", "jpg") else "png"
-        img_path = os.path.join(tmpdir, f"{paper['id'].replace('/', '_')}_fig{i}.{ext}")
-        with open(img_path, "wb") as f:
-            f.write(fig["image_bytes"])
-        saved.append({
-            "path": img_path,
-            "caption": fig["caption"],
-            "width": fig["width"],
-            "height": fig["height"],
-        })
-
-    return saved
-
 
 # ── 요약 생성 ─────────────────────────────────────────────────────────────
 
 def summarize_paper(paper: dict) -> str:
-    prompt = SUMMARY_PROMPT.format(
-        title=paper["title"],
-        authors=paper["authors"],
-        abstract=paper["abstract"],
-    )
+    """7섹션 전체 요약 (MD 파일용)."""
     msg = client.messages.create(
         model="claude-opus-4-5",
         max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": SUMMARY_PROMPT.format(
+            title=paper["title"],
+            authors=paper["authors"],
+            abstract=paper["abstract"],
+        )}],
     )
     return msg.content[0].text
 
-
-# ── PDF 생성 ──────────────────────────────────────────────────────────────
-
-def _register_korean_font():
-    candidates = [
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "/Library/Fonts/AppleGothic.ttf",
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("KoreanFont", path))
-                return "KoreanFont"
-            except Exception:
-                continue
-    return "Helvetica"
-
-
-def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str):
-    """논문 요약 PDF 생성. figures는 get_key_figures() 반환값."""
-    font_name = _register_korean_font()
-
-    doc = SimpleDocTemplate(
-        output_path, pagesize=A4,
-        leftMargin=20*mm, rightMargin=20*mm,
-        topMargin=20*mm, bottomMargin=20*mm,
+def one_line_summary(paper: dict) -> str:
+    """두 문장 요약 (이메일 본문용)."""
+    msg = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=200,
+        messages=[{"role": "user", "content": ONE_LINE_PROMPT.format(
+            title=paper["title"],
+            abstract=paper["abstract"],
+        )}],
     )
+    return msg.content[0].text.strip()
 
-    # 스타일
-    PAGE_W = A4[0] - 40*mm  # 본문 유효 너비
 
-    style_title  = ParagraphStyle("T",  fontName=font_name, fontSize=15, leading=22,
-                                   textColor=colors.HexColor("#1a1a2e"), spaceAfter=6)
-    style_meta   = ParagraphStyle("M",  fontName=font_name, fontSize=10,
-                                   textColor=colors.HexColor("#888888"), spaceAfter=4)
-    style_venue  = ParagraphStyle("V",  fontName=font_name, fontSize=11,
-                                   textColor=colors.HexColor("#7c5cbf"), spaceAfter=10)
-    style_sec    = ParagraphStyle("S",  fontName=font_name, fontSize=13, leading=18,
-                                   textColor=colors.HexColor("#1a1a2e"), spaceBefore=14, spaceAfter=4)
-    style_body   = ParagraphStyle("B",  fontName=font_name, fontSize=11, leading=17,
-                                   textColor=colors.HexColor("#333333"), spaceAfter=4)
-    style_blt    = ParagraphStyle("BL", fontName=font_name, fontSize=11, leading=16,
-                                   leftIndent=12, textColor=colors.HexColor("#444444"), spaceAfter=2)
-    style_cap    = ParagraphStyle("C",  fontName=font_name, fontSize=9, leading=13,
-                                   textColor=colors.HexColor("#666666"), alignment=1,  # 가운데 정렬
-                                   spaceAfter=8)
+# ── MD 파일 생성 ──────────────────────────────────────────────────────────
 
-    story = []
-
-    # ── 헤더 ──
+def create_paper_md(paper: dict, summary: str) -> str:
+    """논문 요약 마크다운 문자열 생성."""
     venue_str = ""
     if paper.get("venue"):
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
-        venue_str = f"{paper['venue']}{yr}"
+        venue_str = f"\n**학회:** {paper['venue']}{yr}"
 
-    story.append(Paragraph(paper["title"], style_title))
-    story.append(Paragraph(f"{paper['authors']}  |  {paper['published']}", style_meta))
-    if venue_str:
-        story.append(Paragraph(f"학회: {venue_str}", style_venue))
-    story.append(Paragraph(f"arXiv: {paper['url']}  |  키워드: {paper['keyword']}", style_meta))
-    story.append(HRFlowable(width="100%", thickness=1.5,
-                             color=colors.HexColor("#7c5cbf"), spaceAfter=10))
+    header = f"""# {paper['title']}
 
-    # ── 핵심 그림 삽입 (있을 경우) ──
-    if figures:
-        story.append(Paragraph("<b>핵심 그림</b>", style_sec))
-        for fig in figures:
-            try:
-                # 이미지를 A4 본문 너비에 맞게 비율 유지하며 축소
-                img_w_pt = fig["width"]
-                img_h_pt = fig["height"]
-                scale = min(PAGE_W / img_w_pt, 160*mm / img_h_pt, 1.0)
-                display_w = img_w_pt * scale
-                display_h = img_h_pt * scale
+**저자:** {paper['authors']}
+**출판:** {paper['published']}{venue_str}
+**arXiv:** {paper['url']}
+**검색 출처:** {paper['keyword']}
 
-                rl_img = RLImage(fig["path"], width=display_w, height=display_h)
-                caption_text = fig["caption"] if fig["caption"] else ""
+---
 
-                story.append(KeepTogether([
-                    Spacer(1, 4*mm),
-                    rl_img,
-                    Paragraph(caption_text, style_cap) if caption_text else Spacer(1, 2*mm),
-                ]))
-            except Exception as e:
-                print(f"    그림 삽입 오류: {e}")
-                continue
+{summary}
 
-        story.append(HRFlowable(width="100%", thickness=0.5,
-                                 color=colors.HexColor("#dddddd"), spaceAfter=6))
-
-    # ── 요약 본문 파싱 ──
-    pending_body = []
-    pending_blt  = []
-
-    def md_to_rl(text: str) -> str:
-        """마크다운 인라인 요소를 ReportLab XML 태그로 변환. 수식은 이미지 경로 반환 불가라 태그로 표시."""
-        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-        text = re.sub(r'`(.+?)`', r'<font name="Courier">\1</font>', text)
-        text = re.sub(r'&(?!amp;|lt;|gt;|quot;)', '&amp;', text)
-        # 수식은 $...$ 형태로 유지 (inline image는 flush_with_math에서 처리)
-        return text
-
-    def make_math_image(latex: str, is_display: bool, tmpdir_math: str) -> str | None:
-        """수식 PNG를 tmpdir에 저장하고 경로 반환."""
-        png = _render_latex_to_png(latex, fontsize=11, is_display=is_display)
-        if not png:
-            return None
-        safe = re.sub(r'[^\w]', '_', latex[:20])
-        path = os.path.join(tmpdir_math, f"math_{safe}_{id(latex)}.png")
-        with open(path, "wb") as f:
-            f.write(png)
-        return path
-
-    def flush_line_with_math(line: str, style, math_tmpdir: str):
-        """한 줄을 텍스트+수식 이미지 혼합으로 story에 추가."""
-        parts = _split_with_math(line)
-        # 수식이 없으면 그냥 Paragraph
-        has_math = any(p["type"] != "text" for p in parts)
-        if not has_math:
-            story.append(Paragraph(md_to_rl(line), style))
-            return
-        # 수식 있으면: 텍스트 파트는 Paragraph, 수식 파트는 RLImage로 인라인 배치
-        # ReportLab은 진정한 인라인 이미지가 어려우므로
-        # 수식이 있는 줄은 텍스트→수식→텍스트 순으로 개별 flowable 삽입
-        for part in parts:
-            if part["type"] == "text" and part["content"].strip():
-                story.append(Paragraph(md_to_rl(part["content"].strip()), style))
-            elif part["type"] in ("inline_math", "display_math"):
-                is_disp = part["type"] == "display_math"
-                img_path = make_math_image(part["content"], is_disp, math_tmpdir)
-                if img_path:
-                    try:
-                        from PIL import Image as PILImage
-                        with PILImage.open(img_path) as im:
-                            w_px, h_px = im.size
-                        # 72dpi 기준으로 pt 변환, 최대 PAGE_W
-                        scale = min(PAGE_W / (w_px / 72 * 72), 1.0)
-                        story.append(RLImage(img_path,
-                                             width=w_px / 96 * 72 * scale,
-                                             height=h_px / 96 * 72 * scale))
-                    except Exception:
-                        story.append(Paragraph(
-                            f'<font name="Courier">${part["content"]}$</font>', style))
-                else:
-                    story.append(Paragraph(
-                        f'<font name="Courier">${part["content"]}$</font>', style))
-
-    import tempfile as _tf
-    math_tmpdir = _tf.mkdtemp()
-
-    def flush():
-        for ln in pending_body:
-            flush_line_with_math(ln, style_body, math_tmpdir)
-        for bl in pending_blt:
-            flush_line_with_math(f"• {bl}", style_blt, math_tmpdir)
-        pending_body.clear()
-        pending_blt.clear()
-
-    for line in summary.split("\n"):
-        line = line.strip()
-
-        # 섹션 헤더: ## 또는 ###
-        if re.match(r'^#{1,3}\s+', line):
-            flush()
-            header = re.sub(r'^#{1,3}\s*', '', line).strip()
-            story.append(KeepTogether([
-                HRFlowable(width="100%", thickness=0.5,
-                           color=colors.HexColor("#dddddd"), spaceBefore=8),
-                Paragraph(f"<b>{md_to_rl(header)}</b>", style_sec),
-            ]))
-
-        # 불릿 리스트: - 또는 *
-        elif re.match(r'^[-*]\s+', line):
-            if pending_body:
-                flush()
-            pending_blt.append(line[2:])
-
-        # 번호 리스트: 1. 2. 또는 Step 1. Step 2.
-        elif re.match(r'^(\d+\.|Step\s+\d+[:\.]?)\s+', line, re.IGNORECASE):
-            if pending_body:
-                flush()
-            # 번호/Step 접두사 유지하되 들여쓰기 적용
-            story.append(Paragraph(md_to_rl(line), style_blt))
-
-        # **로 시작하는 bold 강조 단락 (소제목 역할)
-        elif line.startswith("**") and line.endswith("**"):
-            flush()
-            bold_text = line.strip("*")
-            story.append(Paragraph(f"<b>{md_to_rl(bold_text)}</b>", style_body))
-
-        # 일반 본문
-        elif line:
-            if pending_blt:
-                flush()
-            pending_body.append(line)
-
-        # 빈 줄 — 문단 구분
-        else:
-            if pending_body or pending_blt:
-                flush()
-                story.append(Spacer(1, 2*mm))
-
-    flush()
-
-    # ── 푸터 ──
-    story.append(Spacer(1, 8*mm))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#eeeeee")))
-    story.append(Paragraph(
-        f"생성일: {datetime.now().strftime('%Y-%m-%d')}  |  GitHub Actions + Claude API",
-        style_meta
-    ))
-
-    doc.build(story)
+---
+*생성일: {datetime.now().strftime('%Y-%m-%d')} | GitHub Actions + Claude API*
+"""
+    return header
 
 
-# ── 수식 렌더링 (matplotlib LaTeX → PNG) ────────────────────────────────
+# ── 이메일 빌드 ───────────────────────────────────────────────────────────
 
-def _render_latex_to_png(latex: str, fontsize: int = 13, is_display: bool = False) -> bytes | None:
-    """LaTeX 수식을 PNG bytes로 렌더링. 실패 시 None 반환."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        # display 수식은 더 크게
-        fig_fontsize = fontsize + 2 if is_display else fontsize
-        fig, ax = plt.subplots(figsize=(0.01, 0.01))
-        ax.axis("off")
-
-        # 수식 렌더링 (dollar sign 없이 전달)
-        text = ax.text(
-            0.5, 0.5,
-            f"${latex}$",
-            fontsize=fig_fontsize,
-            ha="center", va="center",
-            transform=fig.transFigure,
-        )
-
-        # 텍스트 bbox 기준으로 figure 크기 자동 조정
-        fig.canvas.draw()
-        bbox = text.get_window_extent(renderer=fig.canvas.get_renderer())
-        dpi = fig.get_dpi()
-        pad = 4  # px padding
-        fig.set_size_inches(
-            (bbox.width + pad * 2) / dpi,
-            (bbox.height + pad * 2) / dpi,
-        )
-        ax.set_position([0, 0, 1, 1])
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", dpi=dpi,
-                    bbox_inches="tight", pad_inches=pad / dpi,
-                    transparent=True)
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        print(f"    수식 렌더링 실패 ({latex[:30]}...): {e}")
-        return None
-
-
-def _split_with_math(text: str) -> list:
-    """텍스트를 일반 텍스트 / 인라인 수식($...$) / 디스플레이 수식($$...$$) 으로 분리.
-    반환: [{"type": "text"|"inline_math"|"display_math", "content": str}, ...]
-    """
-    parts = []
-    # $$...$$ 먼저 ($$가 $ 보다 길어서 먼저 처리)
-    pattern = re.compile(r'(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$)')
-    pos = 0
-    for m in pattern.finditer(text):
-        if m.start() > pos:
-            parts.append({"type": "text", "content": text[pos:m.start()]})
-        raw = m.group(0)
-        if raw.startswith("$$"):
-            parts.append({"type": "display_math", "content": raw[2:-2].strip()})
-        else:
-            parts.append({"type": "inline_math", "content": raw[1:-1].strip()})
-        pos = m.end()
-    if pos < len(text):
-        parts.append({"type": "text", "content": text[pos:]})
-    return parts
-
-
-# ── 마크다운 → HTML 변환 ──────────────────────────────────────────────────
-
-def _md_to_html(text: str) -> str:
-    """요약 마크다운을 이메일용 HTML로 변환."""
-    lines = text.split("\n")
-    html_parts = []
-    in_list = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        # 섹션 헤더 ## / ###
-        if re.match(r'^#{1,3}\s+', stripped):
-            if in_list:
-                html_parts.append("</ul>")
-                in_list = False
-            header = re.sub(r'^#{1,3}\s*', '', stripped)
-            header = _inline_md(header)
-            html_parts.append(
-                f'<p style="margin:16px 0 4px;font-size:14px;font-weight:bold;'
-                f'color:#1a1a2e;border-bottom:1px solid #e0d8f5;padding-bottom:3px">'
-                f'{header}</p>'
-            )
-
-        # 불릿 리스트
-        elif re.match(r'^[-*]\s+', stripped):
-            if not in_list:
-                html_parts.append('<ul style="margin:4px 0 4px 16px;padding:0">')
-                in_list = True
-            content = _inline_md(stripped[2:])
-            html_parts.append(f'<li style="margin:2px 0;line-height:1.7">{content}</li>')
-
-        # 번호 리스트 / Step N
-        elif re.match(r'^(\d+\.|Step\s+\d+[:\.]?)\s+', stripped, re.IGNORECASE):
-            if in_list:
-                html_parts.append("</ul>")
-                in_list = False
-            content = _inline_md(stripped)
-            html_parts.append(
-                f'<p style="margin:4px 0 4px 8px;line-height:1.7;color:#333">{content}</p>'
-            )
-
-        # **bold** 단독 줄 (소제목)
-        elif stripped.startswith("**") and stripped.endswith("**"):
-            if in_list:
-                html_parts.append("</ul>")
-                in_list = False
-            bold_text = _inline_md(stripped)
-            html_parts.append(
-                f'<p style="margin:8px 0 2px;font-weight:bold;color:#333">{bold_text}</p>'
-            )
-
-        # 빈 줄
-        elif not stripped:
-            if in_list:
-                html_parts.append("</ul>")
-                in_list = False
-
-        # 일반 본문
-        else:
-            if in_list:
-                html_parts.append("</ul>")
-                in_list = False
-            content = _inline_md(stripped)
-            html_parts.append(f'<p style="margin:4px 0;line-height:1.8;color:#333">{content}</p>')
-
-    if in_list:
-        html_parts.append("</ul>")
-
-    return "\n".join(html_parts)
-
-
-def _inline_md(text: str) -> str:
-    """인라인 마크다운(bold, italic, code, 수식)을 HTML로 변환."""
-    # 수식 먼저 처리 (이미지로 치환)
-    parts = _split_with_math(text)
-    result = []
-    for part in parts:
-        if part["type"] == "text":
-            t = part["content"]
-            t = t.replace("&", "&amp;")
-            t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
-            t = re.sub(r'\*(.+?)\*', r'<em>\1</em>', t)
-            t = re.sub(
-                r'`(.+?)`',
-                r'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px;'
-                r'font-size:12px">\1</code>',
-                t
-            )
-            result.append(t)
-        elif part["type"] in ("inline_math", "display_math"):
-            is_display = part["type"] == "display_math"
-            png = _render_latex_to_png(part["content"], fontsize=12, is_display=is_display)
-            if png:
-                b64 = base64.b64encode(png).decode()
-                align = "display:block;margin:6px auto" if is_display else "vertical-align:middle"
-                result.append(
-                    f'<img src="data:image/png;base64,{b64}" '
-                    f'style="{align};max-width:100%" alt="{part["content"][:30]}">'
-                )
-            else:
-                # 렌더링 실패 시 텍스트 폴백
-                delim = "$$" if is_display else "$"
-                result.append(
-                    f'<code style="background:#f0eeff;padding:1px 4px;border-radius:3px">'
-                    f'{delim}{part["content"]}{delim}</code>'
-                )
-    return "".join(result)
-
-
-# ── 이메일 ────────────────────────────────────────────────────────────────
-
-def build_email_html(papers: list, summaries: list, figures_per_paper: list, keywords: list) -> str:
+def build_email_html(papers: list, one_liners: list, keywords: list) -> str:
     date_str = datetime.now().strftime("%Y년 %m월 %d일")
 
-    # 키워드 배지 목록
     keyword_badges = "".join(
         f'<span style="display:inline-block;background:#eeeafc;color:#5a3ea8;'
-        f'font-size:12px;padding:3px 10px;border-radius:12px;margin:3px 3px 3px 0">'
+        f'font-size:12px;padding:3px 10px;border-radius:12px;margin:3px 2px">'
         f'{kw}</span>'
         for kw in keywords
     )
-    keyword_section = f"""
-    <div style="background:#f5f3ff;border:1px solid #d4ccf5;border-radius:6px;
-    padding:12px 16px;margin-bottom:20px;">
-      <p style="margin:0 0 8px;font-size:12px;color:#7c5cbf;font-weight:bold">
-        현재 관심 키워드
-      </p>
-      <div>{keyword_badges}</div>
-      <p style="margin:8px 0 0;font-size:11px;color:#aaa">
-        키워드를 변경하려면 이 메일에 회신하세요. 예: <code>앞으로는 RLHF, alignment 위주로 보내줘</code>
-      </p>
-    </div>"""
 
     items = ""
-    for i, (p, s, figs) in enumerate(zip(papers, summaries, figures_per_paper), 1):
+    for i, (p, ol) in enumerate(zip(papers, one_liners), 1):
         venue_badge = ""
         if p.get("venue"):
             yr = f" {p['venue_year']}" if p.get("venue_year") else ""
             venue_badge = (
-                f'<span style="background:#7c5cbf;color:#fff;font-size:11px;'
-                f'padding:2px 8px;border-radius:10px;margin-left:8px">'
-                f'{p["venue"]}{yr}</span>'
+                f' <span style="background:#7c5cbf;color:#fff;font-size:11px;'
+                f'padding:2px 8px;border-radius:10px">{p["venue"]}{yr}</span>'
             )
-        fig_note = (
-            f'<span style="color:#2a9d8f;font-size:12px"> · 핵심 그림 {len(figs)}개 포함</span>'
-            if figs else ""
-        )
-        summary_html = _md_to_html(s)
+
+        # 출처 표시 (시드 논문 여부)
+        source_tag = ""
+        if p.get("keyword") == "시드 논문":
+            source_tag = ' <span style="background:#e8f5e9;color:#2e7d32;font-size:11px;padding:2px 6px;border-radius:8px">시드</span>'
+        elif p.get("keyword", "").startswith("인용"):
+            source_tag = ' <span style="background:#e3f2fd;color:#1565c0;font-size:11px;padding:2px 6px;border-radius:8px">인용</span>'
+
         items += f"""
-        <div style="background:#f8f9fa;border-left:4px solid #7c5cbf;
-                    padding:18px;margin:20px 0;border-radius:6px;">
-          <p style="margin:0 0 4px;font-size:16px">
-            <strong>{i}. <a href="{p['url']}" style="color:#1a1a2e;text-decoration:none"
-            >{p['title']}</a></strong>{venue_badge}
+        <div style="border:1px solid #e8e4f5;border-radius:8px;padding:16px;margin:14px 0">
+          <p style="margin:0 0 6px;font-size:15px;line-height:1.4">
+            <strong>{i}. <a href="{p['url']}" style="color:#1a1a2e;text-decoration:none">{p['title']}</a></strong>
+            {venue_badge}{source_tag}
           </p>
-          <p style="margin:0 0 14px;color:#888;font-size:12px">
-            {p['authors']} · {p['published']} · 검색 키워드: <code>{p['keyword']}</code>
+          <p style="margin:0 0 10px;color:#999;font-size:12px">
+            {p['authors']} · {p['published']}
           </p>
-          <div style="font-size:14px;line-height:1.8;color:#333">{summary_html}</div>
-          <p style="margin:10px 0 0;font-size:12px;color:#999">
-            PDF 첨부파일 포함{fig_note}
+          <p style="margin:0 0 8px;font-size:14px;line-height:1.7;color:#444">{ol}</p>
+          <p style="margin:0;font-size:12px;color:#aaa">
+            📎 상세 요약(수식·표 포함)은 첨부된 .md 파일을 확인하세요.
           </p>
         </div>"""
 
-    return f"""<html><body style="font-family:Arial,sans-serif;max-width:740px;
-    margin:auto;color:#333;padding:20px">
-    <h2 style="color:#1a1a2e;border-bottom:3px solid #7c5cbf;padding-bottom:10px">
-      arXiv 논문 다이제스트 — {date_str}
+    return f"""<html><body style="font-family:Arial,sans-serif;max-width:700px;margin:auto;color:#333;padding:20px">
+    <h2 style="color:#1a1a2e;border-bottom:2px solid #7c5cbf;padding-bottom:8px">
+      📄 arXiv 논문 다이제스트 — {date_str}
     </h2>
-    {keyword_section}
-    <div style="background:#fffbea;border:1px solid #f0d080;border-radius:6px;
-    padding:14px;margin-bottom:24px;font-size:14px">
-      오늘의 논문 <strong>{len(papers)}편</strong>입니다 (탑티어 학회 우선 선별).<br>
-      PDF 첨부파일에 핵심 그림이 포함되어 있습니다.<br><br>
-      <strong>회신 형식:</strong><br>
-      • 번호별 평가: <code>1: 관심있음 / 2: 보통 / 3: 관심없음</code><br>
-      • 주제 변경: <code>앞으로는 RL이나 RLHF 관련 논문 위주로 보내줘</code>
+
+    <div style="background:#f5f3ff;border:1px solid #d4ccf5;border-radius:6px;
+    padding:12px 16px;margin-bottom:16px">
+      <p style="margin:0 0 6px;font-size:12px;color:#7c5cbf;font-weight:bold">현재 관심 키워드</p>
+      <div>{keyword_badges}</div>
     </div>
+
+    <div style="background:#fffbea;border:1px solid #f0d080;border-radius:6px;
+    padding:12px 16px;margin-bottom:20px;font-size:13px">
+      오늘의 논문 <strong>{len(papers)}편</strong>입니다.
+      각 논문의 <strong>상세 요약(수식·표·Step-by-step 방법론)</strong>은 첨부된 <code>.md</code> 파일에 있습니다.<br><br>
+      <strong>다 읽고 회신해주세요:</strong>
+      <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">1: 관심있음 / 2: 보통 / 3: 관심없음</code>
+      또는 <code style="background:#f0f0f0;padding:2px 6px;border-radius:3px">앞으로 RL 위주로 보내줘</code>
+    </div>
+
     {items}
-    <p style="color:#aaa;font-size:12px;margin-top:30px;
-    border-top:1px solid #eee;padding-top:12px">
-      이 메일은 GitHub Actions + Claude API로 자동 생성되었습니다.
-    </p></body></html>"""
+
+    <p style="color:#bbb;font-size:11px;margin-top:24px;border-top:1px solid #eee;padding-top:10px">
+      GitHub Actions + Claude API로 자동 생성
+    </p>
+    </body></html>"""
 
 
-def send_email(subject: str, html_body: str, pdf_paths: list):
+def send_email(subject: str, html_body: str, md_paths: list):
+    """HTML 본문 + MD 파일 첨부."""
     msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
-    msg["From"] = os.environ["GMAIL_USER"]
-    msg["To"] = os.environ["TO_EMAIL"]
+    msg["From"]    = os.environ["GMAIL_USER"]
+    msg["To"]      = os.environ["TO_EMAIL"]
 
     alt = MIMEMultipart("alternative")
     alt.attach(MIMEText(html_body, "html", "utf-8"))
     msg.attach(alt)
 
-    for pdf_path in pdf_paths:
-        with open(pdf_path, "rb") as f:
-            part = MIMEBase("application", "pdf")
+    for md_path in md_paths:
+        with open(md_path, "rb") as f:
+            part = MIMEBase("text", "markdown")
             part.set_payload(f.read())
         encoders.encode_base64(part)
         part.add_header("Content-Disposition",
-                        f'attachment; filename="{Path(pdf_path).name}"')
+                        f'attachment; filename="{Path(md_path).name}"')
         msg.attach(part)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
@@ -1058,18 +374,19 @@ def commit_state():
     subprocess.run(["git", "add", "state.json"], check=True)
     result = subprocess.run(["git", "diff", "--cached", "--quiet"])
     if result.returncode != 0:
-        subprocess.run(["git", "commit", "-m", "chore: update state after sending digest"], check=True)
+        subprocess.run(["git", "commit", "-m", "chore: update state after digest"], check=True)
         subprocess.run(["git", "push"], check=True)
 
 
 # ── 메인 ─────────────────────────────────────────────────────────────────
 
 def main():
-    import time as _time
+    import tempfile as _tf
+
     state = load_state()
 
     if state.get("waiting_for_feedback"):
-        print("피드백 대기 중 — 새 배치 발송 건너뜀")
+        print("피드백 대기 중 — 발송 건너뜀")
         return
 
     batch_size = state.get("batch_size", 4)
@@ -1077,17 +394,15 @@ def main():
     print("논문 수집 중...")
     candidates = fetch_all_papers(state)
 
-    # 학회 필터링 (Semantic Scholar에서 이미 venue 정보 포함)
     filtered = [p for p in candidates if is_top_venue(p.get("venue", ""))]
     print(f"  탑티어 학회 논문: {len(filtered)}편")
 
-    # 탑티어 부족하면 시드 논문은 학회 무관하게 포함
+    # 탑티어 부족하면 시드 논문은 학회 무관 포함
     if len(filtered) < batch_size:
-        seed_papers = [p for p in candidates
-                       if p.get("keyword") == "시드 논문"
-                       and p not in filtered]
-        filtered = filtered + seed_papers
-        print(f"  시드 논문 추가 후: {len(filtered)}편")
+        seed_only = [p for p in candidates
+                     if p.get("keyword") == "시드 논문" and p not in filtered]
+        filtered = filtered + seed_only
+        print(f"  시드 포함 후: {len(filtered)}편")
 
     if not filtered:
         print("새 논문 없음")
@@ -1096,39 +411,41 @@ def main():
     batch = filtered[:batch_size]
     print(f"\n{len(batch)}편 처리 시작...")
 
-    summaries = []
-    pdf_paths = []
-    figures_per_paper = []
+    one_liners = []
+    md_paths   = []
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with _tf.TemporaryDirectory() as tmpdir:
         for i, p in enumerate(batch, 1):
             venue_info = f"({p['venue']})" if p.get("venue") else "(학회 미확인)"
-            print(f"\n  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
+            print(f"  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
 
-            summary = summarize_paper(p)
-            summaries.append(summary)
+            # 전체 요약 (MD용)
+            summary   = summarize_paper(p)
+            # 두 문장 요약 (이메일 본문용)
+            one_liner = one_line_summary(p)
+            one_liners.append(one_liner)
 
-            figures = get_key_figures(p, tmpdir)
-            figures_per_paper.append(figures)
+            # MD 파일 생성
+            md_content = create_paper_md(p, summary)
+            safe_title = re.sub(r'[^\w\s-]', '', p['title'])[:45].strip()
+            md_path    = os.path.join(tmpdir, f"{i:02d}_{safe_title}.md")
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(md_content)
+            md_paths.append(md_path)
+            print(f"    MD 생성 완료")
 
-            safe_title = re.sub(r'[^\w\s-]', '', p['title'])[:40].strip()
-            pdf_path = os.path.join(tmpdir, f"{i:02d}_{safe_title}.pdf")
-            create_paper_pdf(p, summary, figures, pdf_path)
-            pdf_paths.append(pdf_path)
-            print(f"    PDF 생성 완료 (그림 {len(figures)}개 포함)")
-
-        html = build_email_html(batch, summaries, figures_per_paper, state["keywords"])
+        html = build_email_html(batch, one_liners, state["keywords"])
         date_str = datetime.now().strftime("%m/%d")
         venue_names = list({p["venue"] for p in batch if p.get("venue")})
         venue_str = f" | {', '.join(venue_names)}" if venue_names else ""
         send_email(
             f"[arXiv 다이제스트] {date_str} — {len(batch)}편{venue_str}",
-            html, pdf_paths,
+            html, md_paths,
         )
 
-    print("\n이메일 발송 완료 (PDF + 핵심 그림 첨부)")
+    print("\n이메일 발송 완료 (MD 첨부)")
 
-    state["sent_papers"] = state.get("sent_papers", []) + [p["id"] for p in batch]
+    state["sent_papers"]     = state.get("sent_papers", []) + [p["id"] for p in batch]
     state["pending_feedback"] = [{"id": p["id"], "title": p["title"]} for p in batch]
     state["waiting_for_feedback"] = True
     save_state(state)
