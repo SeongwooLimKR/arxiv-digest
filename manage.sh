@@ -211,6 +211,22 @@ cmd_run() {
     local REPO="$(gh api user --jq '.login')/arxiv-digest"
     echo -e "${YELLOW}다이제스트 발송 + 피드백 폴링을 시작합니다...${NC}"
 
+    # 실행 중인 피드백 워크플로우 취소
+    echo "기존 피드백 폴링 확인 중..."
+    RUNNING_IDS=$(gh run list --repo "$REPO" --workflow process_feedback.yml \
+        --json databaseId,status \
+        --jq '.[] | select(.status=="in_progress" or .status=="queued") | .databaseId' 2>/dev/null)
+
+    if [ -n "$RUNNING_IDS" ]; then
+        for RUN_ID in $RUNNING_IDS; do
+            gh run cancel "$RUN_ID" --repo "$REPO" 2>/dev/null
+            echo -e "${YELLOW}  ⚠️  기존 피드백 폴링 취소: $RUN_ID${NC}"
+        done
+        sleep 2  # 취소 반영 대기
+    else
+        echo "  실행 중인 피드백 폴링 없음"
+    fi
+
     gh workflow run daily_digest.yml --repo "$REPO"
     echo -e "${GREEN}  ✅ 논문 발송 워크플로우 시작${NC}"
 
