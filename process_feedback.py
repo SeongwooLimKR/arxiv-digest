@@ -198,39 +198,31 @@ def process_once(state: dict, service) -> bool:
 def main():
     import time
 
-    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))   # 기본 5분
-    poll_timeout  = int(os.environ.get("POLL_TIMEOUT_SECONDS", "43200"))  # 기본 12시간
+    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))  # 기본 5분
 
-    state = load_state()
-
-    if not state.get("waiting_for_feedback"):
-        print("피드백 대기 상태 아님 — 종료")
-        return
-
-    print(f"Gmail 폴링 시작 (간격: {poll_interval//60}분, 최대 대기: {poll_timeout//3600}시간)")
+    print(f"Gmail 폴링 시작 (간격: {poll_interval//60}분)")
     service = get_gmail_service()
 
     elapsed = 0
-    while elapsed < poll_timeout:
+    while True:
         print(f"[{elapsed//60}분 경과] 회신 확인 중...")
 
-        # state를 매 루프마다 새로 읽기 (외부에서 변경될 수 있으므로)
         state = load_state()
 
         if not state.get("waiting_for_feedback"):
-            print("피드백 대기 상태 해제됨 — 종료")
-            return
+            print("피드백 대기 상태 아님 — 5분 후 재확인")
+        else:
+            done = process_once(state, service)
+            if done:
+                print("피드백 처리 + 다음 배치 발송 완료 — 폴링 계속")
+                elapsed = 0  # 타이머 리셋
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+                continue
 
-        done = process_once(state, service)
-        if done:
-            print("피드백 처리 완료 — 종료")
-            return
-
-        print(f"회신 없음 — {poll_interval//60}분 후 재확인")
+        print(f"대기 중 — {poll_interval//60}분 후 재확인")
         time.sleep(poll_interval)
         elapsed += poll_interval
-
-    print(f"최대 대기 시간({poll_timeout//3600}시간) 초과 — 종료")
 
 
 if __name__ == "__main__":
