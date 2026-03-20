@@ -1,8 +1,10 @@
 {
   "keywords": [
-    "large language model",
-    "retrieval augmented generation",
-    "multimodal learning"
+    "Statistical Relational Learning",
+    "Markov Logic Networks",
+    "Probabilistic Logic",
+    "Lifted Inference",
+    "Integrated Gradients"
   ],
   "batch_size": 4,
   "sent_papers": [],
