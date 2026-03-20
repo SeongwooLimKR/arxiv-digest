@@ -1,13 +1,8 @@
 name: Process Feedback
 
 on:
-  # 매일 오전 9시 최초 실행
   schedule:
-    - cron: '0 0 * * *'
-  # 이 워크플로우가 완료되면 바로 재시작 (무한 루프)
-  workflow_run:
-    workflows: ["Process Feedback"]
-    types: [completed]
+    - cron: '0 0 * * *'   # 매일 오전 9시 최초 실행
   workflow_dispatch:
 
 jobs:
@@ -15,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     timeout-minutes: 720
 
     steps:
@@ -38,3 +34,9 @@ jobs:
           GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           POLL_INTERVAL_SECONDS: "300"
+
+      - name: Restart workflow
+        if: always()
+        run: gh workflow run process_feedback.yml --repo ${{ github.repository }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
