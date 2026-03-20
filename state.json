@@ -7,31 +7,9 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 4,
-  "sent_papers": [
-    "2204.04009",
-    "2403.15933",
-    "2305.20052",
-    "2407.11877"
-  ],
-  "pending_feedback": [
-    {
-      "id": "2204.04009",
-      "title": "On Projectivity in Markov Logic Networks"
-    },
-    {
-      "id": "2403.15933",
-      "title": "Understanding Domain-Size Generalization in Markov Logic Networks"
-    },
-    {
-      "id": "2305.20052",
-      "title": "Integrated Decision Gradients: Compute Your Attributions Where the Model Makes Its Decision"
-    },
-    {
-      "id": "2407.11877",
-      "title": "Bridging Weighted First Order Model Counting and Graph Polynomials"
-    }
-  ],
-  "waiting_for_feedback": true,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
