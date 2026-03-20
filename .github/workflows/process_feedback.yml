@@ -1,9 +1,13 @@
 name: Process Feedback
 
 on:
-  # daily_digest와 같은 시각 실행 — 발송 후 즉시 폴링 시작
+  # 매일 오전 9시 최초 실행
   schedule:
     - cron: '0 0 * * *'
+  # 이 워크플로우가 완료되면 바로 재시작 (무한 루프)
+  workflow_run:
+    workflows: ["Process Feedback"]
+    types: [completed]
   workflow_dispatch:
 
 jobs:
@@ -34,4 +38,3 @@ jobs:
           GMAIL_CREDENTIALS: ${{ secrets.GMAIL_CREDENTIALS }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           POLL_INTERVAL_SECONDS: "300"
-          POLL_TIMEOUT_SECONDS: "43200"
