@@ -1,0 +1,13 @@
+{
+  "keywords": [
+    "large language model",
+    "retrieval augmented generation",
+    "multimodal learning"
+  ],
+  "batch_size": 4,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
+  "feedback_history": [],
+  "processed_message_ids": []
+}
