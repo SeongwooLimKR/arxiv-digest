@@ -1,4 +1,4 @@
-import os, json, smtplib, feedparser, requests, re, tempfile
+import os, json, smtplib, feedparser, requests, re, tempfile, io
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -8,11 +8,12 @@ from pathlib import Path
 import anthropic
 
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, HRFlowable, KeepTogether
+    SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
+    KeepTogether, Image as RLImage,
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -28,6 +29,29 @@ TOP_VENUES = {
     "KDD", "WWW", "SIGIR", "WSDM", "RecSys",
     "JMLR", "TACL", "Nature", "Science",
 }
+
+# ── 그림 선별 기준 ────────────────────────────────────────────────────────
+# 최소 크기 (너무 작은 아이콘·로고 제외)
+MIN_IMG_WIDTH  = 100   # px
+MIN_IMG_HEIGHT = 80    # px
+# 논문당 최대 선별 그림 수
+MAX_FIGURES_PER_PAPER = 3
+
+# ── 캡션 기반 선별 프롬프트 ───────────────────────────────────────────────
+FIGURE_FILTER_PROMPT = """다음은 AI/ML 논문에서 추출한 그림들의 캡션 목록이야.
+각 그림이 논문의 방법론이나 핵심 개념을 이해하는 데 핵심적으로 도움이 되는지 판단해줘.
+
+선택 기준:
+- 포함: 모델 아키텍처, 전체 파이프라인, 핵심 알고리즘 흐름, 주요 실험 결과 비교표/그래프
+- 제외: 단순 예시 이미지, 관련 없는 배경 설명, 세부 ablation 결과, 데이터셋 샘플
+
+캡션 목록:
+{captions}
+
+아래 JSON만 반환해줘. 설명 없이 JSON만.
+{{"selected": [포함할 그림의 인덱스(0부터 시작) 배열]}}
+
+최대 {max_count}개만 선택. 핵심적인 것이 없으면 빈 배열 반환."""
 
 # ── 논문 요약 프롬프트 ────────────────────────────────────────────────────
 SUMMARY_PROMPT = """학술 논문을 구조적으로 분석하여 핵심 내용을 한국어로 정리해줘.
@@ -82,7 +106,6 @@ def load_state() -> dict:
     with open("state.json", encoding="utf-8") as f:
         return json.load(f)
 
-
 def save_state(state: dict):
     with open("state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -124,13 +147,13 @@ def fetch_papers(keywords: list, max_per_kw: int, exclude_ids: list) -> list:
     return papers
 
 
+# ── 학회 필터링 ───────────────────────────────────────────────────────────
+
 def get_venue_from_semantic_scholar(paper: dict) -> dict:
-    """Semantic Scholar API로 학회 정보 조회 (무료, 키 불필요)"""
     try:
         arxiv_id = paper["id"].split("v")[0]
         url = f"https://api.semanticscholar.org/graph/v1/paper/arXiv:{arxiv_id}"
-        params = {"fields": "venue,publicationVenue,year"}
-        resp = requests.get(url, params=params, timeout=8)
+        resp = requests.get(url, params={"fields": "venue,publicationVenue,year"}, timeout=8)
         if resp.status_code != 200:
             return paper
         data = resp.json()
@@ -143,19 +166,14 @@ def get_venue_from_semantic_scholar(paper: dict) -> dict:
         pass
     return paper
 
-
 def is_top_venue(venue: str) -> bool:
     if not venue:
         return False
-    venue_upper = venue.upper()
-    for top in TOP_VENUES:
-        if top.upper() in venue_upper:
-            return True
-    return False
-
+    v = venue.upper()
+    return any(top.upper() in v for top in TOP_VENUES)
 
 def enrich_and_filter_papers(papers: list, require_venue: bool = True) -> list:
-    print(f"  검색된 논문 {len(papers)}편 학회 정보 조회 중...")
+    print(f"  {len(papers)}편 학회 정보 조회 중...")
     enriched = []
     for p in papers:
         p = get_venue_from_semantic_scholar(p)
@@ -165,6 +183,176 @@ def enrich_and_filter_papers(papers: list, require_venue: bool = True) -> list:
             enriched.append(p)
     print(f"  탑티어 학회 논문: {len(enriched)}편")
     return enriched
+
+
+# ── 그림 추출 및 선별 ─────────────────────────────────────────────────────
+
+def download_arxiv_pdf(arxiv_id: str, dest_path: str) -> bool:
+    """arXiv PDF 다운로드. 성공 시 True."""
+    pid = arxiv_id.split("v")[0]
+    url = f"https://arxiv.org/pdf/{pid}.pdf"
+    try:
+        resp = requests.get(url, timeout=30, stream=True)
+        if resp.status_code != 200:
+            return False
+        with open(dest_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return True
+    except Exception:
+        return False
+
+
+def extract_figures_with_captions(pdf_path: str) -> list:
+    """pymupdf로 PDF에서 그림+캡션을 추출.
+    반환: [{"index": int, "caption": str, "image_bytes": bytes, "ext": str}, ...]
+    """
+    try:
+        import fitz  # pymupdf
+    except ImportError:
+        print("  pymupdf 없음 — 그림 추출 건너뜀")
+        return []
+
+    results = []
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception:
+        return []
+
+    # 전체 텍스트를 페이지별로 수집 (캡션 매칭용)
+    page_texts = []
+    for page in doc:
+        page_texts.append(page.get_text("text"))
+
+    fig_index = 0
+    for page_num, page in enumerate(doc):
+        page_text = page_texts[page_num]
+
+        # 페이지에서 이미지 목록 추출
+        img_list = page.get_images(full=True)
+        for img_info in img_list:
+            xref = img_info[0]
+            try:
+                base_image = doc.extract_image(xref)
+            except Exception:
+                continue
+
+            w, h = base_image["width"], base_image["height"]
+            # 너무 작은 이미지(아이콘, 로고 등) 제외
+            if w < MIN_IMG_WIDTH or h < MIN_IMG_HEIGHT:
+                continue
+            # 가로/세로 비율이 너무 극단적인 것 제외 (구분선 등)
+            ratio = w / h if h > 0 else 0
+            if ratio > 10 or ratio < 0.1:
+                continue
+
+            # 해당 페이지에서 Figure 캡션 찾기
+            # "Figure N", "Fig. N", "Fig N" 패턴 탐색
+            caption = _find_caption_for_figure(page_text, fig_index + 1)
+
+            results.append({
+                "index": fig_index,
+                "caption": caption,
+                "image_bytes": base_image["image"],
+                "ext": base_image["ext"],
+                "width": w,
+                "height": h,
+            })
+            fig_index += 1
+
+    doc.close()
+    return results
+
+
+def _find_caption_for_figure(page_text: str, fig_num: int) -> str:
+    """페이지 텍스트에서 Figure N 캡션 추출."""
+    patterns = [
+        rf"Figure\s+{fig_num}[:\.]?\s*(.{{10,300}})",
+        rf"Fig\.\s*{fig_num}[:\.]?\s*(.{{10,300}})",
+        rf"Fig\s+{fig_num}[:\.]?\s*(.{{10,300}})",
+        rf"FIGURE\s+{fig_num}[:\.]?\s*(.{{10,300}})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, page_text, re.IGNORECASE | re.DOTALL)
+        if m:
+            caption = m.group(1).strip()
+            # 줄바꿈 정리, 최대 200자
+            caption = re.sub(r'\s+', ' ', caption)[:200]
+            return caption
+    return ""
+
+
+def select_key_figures(figures: list, max_count: int = MAX_FIGURES_PER_PAPER) -> list:
+    """캡션 텍스트를 Claude에게 보내서 핵심 그림만 선별."""
+    if not figures:
+        return []
+
+    # 캡션이 있는 것만 후보로 (캡션 없는 그림은 판단 불가)
+    candidates = [f for f in figures if f["caption"]]
+    if not candidates:
+        # 캡션 없으면 크기 기준 상위 max_count개 반환
+        return sorted(figures, key=lambda x: x["width"] * x["height"], reverse=True)[:max_count]
+
+    # 캡션 목록 구성
+    captions_text = "\n".join(
+        f"[{i}] {f['caption']}" for i, f in enumerate(candidates)
+    )
+
+    prompt = FIGURE_FILTER_PROMPT.format(
+        captions=captions_text,
+        max_count=max_count,
+    )
+
+    try:
+        msg = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = msg.content[0].text.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].replace("json", "").strip()
+        result = json.loads(raw)
+        selected_indices = result.get("selected", [])
+        return [candidates[i] for i in selected_indices if i < len(candidates)]
+    except Exception as e:
+        print(f"  그림 선별 오류: {e} — 크기 기준으로 폴백")
+        return sorted(candidates, key=lambda x: x["width"] * x["height"], reverse=True)[:max_count]
+
+
+def get_key_figures(paper: dict, tmpdir: str) -> list:
+    """PDF 다운로드 → 그림 추출 → 캡션 기반 선별 → 선별된 그림 반환."""
+    pdf_path = os.path.join(tmpdir, f"{paper['id'].replace('/', '_')}.pdf")
+
+    print(f"    PDF 다운로드 중...")
+    if not download_arxiv_pdf(paper["id"], pdf_path):
+        print(f"    PDF 다운로드 실패 — 그림 없이 진행")
+        return []
+
+    figures = extract_figures_with_captions(pdf_path)
+    print(f"    그림 {len(figures)}개 발견")
+
+    if not figures:
+        return []
+
+    selected = select_key_figures(figures, MAX_FIGURES_PER_PAPER)
+    print(f"    핵심 그림 {len(selected)}개 선별됨")
+
+    # 선별된 그림을 tmpdir에 이미지 파일로 저장
+    saved = []
+    for i, fig in enumerate(selected):
+        ext = fig["ext"] if fig["ext"] in ("png", "jpeg", "jpg") else "png"
+        img_path = os.path.join(tmpdir, f"{paper['id'].replace('/', '_')}_fig{i}.{ext}")
+        with open(img_path, "wb") as f:
+            f.write(fig["image_bytes"])
+        saved.append({
+            "path": img_path,
+            "caption": fig["caption"],
+            "width": fig["width"],
+            "height": fig["height"],
+        })
+
+    return saved
 
 
 # ── 요약 생성 ─────────────────────────────────────────────────────────────
@@ -187,9 +375,9 @@ def summarize_paper(paper: dict) -> str:
 
 def _register_korean_font():
     candidates = [
-        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",      # Ubuntu
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",       # Ubuntu fallback
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",            # macOS
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
         "/Library/Fonts/AppleGothic.ttf",
     ]
     for path in candidates:
@@ -202,7 +390,8 @@ def _register_korean_font():
     return "Helvetica"
 
 
-def create_paper_pdf(paper: dict, summary: str, output_path: str):
+def create_paper_pdf(paper: dict, summary: str, figures: list, output_path: str):
+    """논문 요약 PDF 생성. figures는 get_key_figures() 반환값."""
     font_name = _register_korean_font()
 
     doc = SimpleDocTemplate(
@@ -211,26 +400,28 @@ def create_paper_pdf(paper: dict, summary: str, output_path: str):
         topMargin=20*mm, bottomMargin=20*mm,
     )
 
-    style_title = ParagraphStyle("T", fontName=font_name, fontSize=15,
-                                  leading=22, textColor=colors.HexColor("#1a1a2e"),
-                                  spaceAfter=6)
-    style_meta  = ParagraphStyle("M", fontName=font_name, fontSize=10,
-                                  textColor=colors.HexColor("#888888"), spaceAfter=4)
-    style_venue = ParagraphStyle("V", fontName=font_name, fontSize=11,
-                                  textColor=colors.HexColor("#7c5cbf"), spaceAfter=10)
-    style_sec   = ParagraphStyle("S", fontName=font_name, fontSize=13,
-                                  leading=18, textColor=colors.HexColor("#1a1a2e"),
-                                  spaceBefore=14, spaceAfter=4)
-    style_body  = ParagraphStyle("B", fontName=font_name, fontSize=11,
-                                  leading=17, textColor=colors.HexColor("#333333"),
-                                  spaceAfter=4)
-    style_blt   = ParagraphStyle("BL", fontName=font_name, fontSize=11,
-                                  leading=16, leftIndent=12,
-                                  textColor=colors.HexColor("#444444"), spaceAfter=2)
+    # 스타일
+    PAGE_W = A4[0] - 40*mm  # 본문 유효 너비
+
+    style_title  = ParagraphStyle("T",  fontName=font_name, fontSize=15, leading=22,
+                                   textColor=colors.HexColor("#1a1a2e"), spaceAfter=6)
+    style_meta   = ParagraphStyle("M",  fontName=font_name, fontSize=10,
+                                   textColor=colors.HexColor("#888888"), spaceAfter=4)
+    style_venue  = ParagraphStyle("V",  fontName=font_name, fontSize=11,
+                                   textColor=colors.HexColor("#7c5cbf"), spaceAfter=10)
+    style_sec    = ParagraphStyle("S",  fontName=font_name, fontSize=13, leading=18,
+                                   textColor=colors.HexColor("#1a1a2e"), spaceBefore=14, spaceAfter=4)
+    style_body   = ParagraphStyle("B",  fontName=font_name, fontSize=11, leading=17,
+                                   textColor=colors.HexColor("#333333"), spaceAfter=4)
+    style_blt    = ParagraphStyle("BL", fontName=font_name, fontSize=11, leading=16,
+                                   leftIndent=12, textColor=colors.HexColor("#444444"), spaceAfter=2)
+    style_cap    = ParagraphStyle("C",  fontName=font_name, fontSize=9, leading=13,
+                                   textColor=colors.HexColor("#666666"), alignment=1,  # 가운데 정렬
+                                   spaceAfter=8)
 
     story = []
 
-    # 헤더
+    # ── 헤더 ──
     venue_str = ""
     if paper.get("venue"):
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
@@ -244,7 +435,34 @@ def create_paper_pdf(paper: dict, summary: str, output_path: str):
     story.append(HRFlowable(width="100%", thickness=1.5,
                              color=colors.HexColor("#7c5cbf"), spaceAfter=10))
 
-    # 본문 파싱
+    # ── 핵심 그림 삽입 (있을 경우) ──
+    if figures:
+        story.append(Paragraph("<b>핵심 그림</b>", style_sec))
+        for fig in figures:
+            try:
+                # 이미지를 A4 본문 너비에 맞게 비율 유지하며 축소
+                img_w_pt = fig["width"]
+                img_h_pt = fig["height"]
+                scale = min(PAGE_W / img_w_pt, 160*mm / img_h_pt, 1.0)
+                display_w = img_w_pt * scale
+                display_h = img_h_pt * scale
+
+                rl_img = RLImage(fig["path"], width=display_w, height=display_h)
+                caption_text = fig["caption"] if fig["caption"] else ""
+
+                story.append(KeepTogether([
+                    Spacer(1, 4*mm),
+                    rl_img,
+                    Paragraph(caption_text, style_cap) if caption_text else Spacer(1, 2*mm),
+                ]))
+            except Exception as e:
+                print(f"    그림 삽입 오류: {e}")
+                continue
+
+        story.append(HRFlowable(width="100%", thickness=0.5,
+                                 color=colors.HexColor("#dddddd"), spaceAfter=6))
+
+    # ── 요약 본문 파싱 ──
     pending_body = []
     pending_blt  = []
 
@@ -277,7 +495,7 @@ def create_paper_pdf(paper: dict, summary: str, output_path: str):
 
     flush()
 
-    # 푸터
+    # ── 푸터 ──
     story.append(Spacer(1, 8*mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#eeeeee")))
     story.append(Paragraph(
@@ -290,10 +508,10 @@ def create_paper_pdf(paper: dict, summary: str, output_path: str):
 
 # ── 이메일 ────────────────────────────────────────────────────────────────
 
-def build_email_html(papers: list, summaries: list) -> str:
+def build_email_html(papers: list, summaries: list, figures_per_paper: list) -> str:
     date_str = datetime.now().strftime("%Y년 %m월 %d일")
     items = ""
-    for i, (p, s) in enumerate(zip(papers, summaries), 1):
+    for i, (p, s, figs) in enumerate(zip(papers, summaries, figures_per_paper), 1):
         venue_badge = ""
         if p.get("venue"):
             yr = f" {p['venue_year']}" if p.get("venue_year") else ""
@@ -302,6 +520,10 @@ def build_email_html(papers: list, summaries: list) -> str:
                 f'padding:2px 8px;border-radius:10px;margin-left:8px">'
                 f'{p["venue"]}{yr}</span>'
             )
+        fig_note = (
+            f'<span style="color:#2a9d8f;font-size:12px">핵심 그림 {len(figs)}개 포함</span>'
+            if figs else ""
+        )
         summary_html = (
             s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
              .replace("\n## ", "<br><br><strong>")
@@ -320,7 +542,7 @@ def build_email_html(papers: list, summaries: list) -> str:
           </p>
           <div style="font-size:14px;line-height:1.8;color:#333">{summary_html}</div>
           <p style="margin:10px 0 0;font-size:12px;color:#999">
-            PDF 요약본이 첨부파일로 함께 발송되었습니다.
+            PDF 첨부파일 포함 {fig_note}
           </p>
         </div>"""
 
@@ -332,7 +554,7 @@ def build_email_html(papers: list, summaries: list) -> str:
     <div style="background:#fffbea;border:1px solid #f0d080;border-radius:6px;
     padding:14px;margin-bottom:24px;font-size:14px">
       오늘의 논문 <strong>{len(papers)}편</strong>입니다 (탑티어 학회 우선 선별).<br>
-      다 읽고 나서 <strong>이 메일에 회신</strong>해주세요.<br><br>
+      PDF 첨부파일에 핵심 그림이 포함되어 있습니다.<br><br>
       <strong>회신 형식:</strong><br>
       • 번호별 평가: <code>1: 관심있음 / 2: 보통 / 3: 관심없음</code><br>
       • 주제 변경: <code>앞으로는 RL이나 RLHF 관련 논문 위주로 보내줘</code>
@@ -359,8 +581,8 @@ def send_email(subject: str, html_body: str, pdf_paths: list):
             part = MIMEBase("application", "pdf")
             part.set_payload(f.read())
         encoders.encode_base64(part)
-        filename = Path(pdf_path).name
-        part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+        part.add_header("Content-Disposition",
+                        f'attachment; filename="{Path(pdf_path).name}"')
         msg.attach(part)
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
@@ -395,7 +617,6 @@ def main():
         exclude_ids=state.get("sent_papers", []),
     )
 
-    # 탑티어 학회 우선, 부족하면 학회 미확인 최신 논문으로 보완
     filtered = enrich_and_filter_papers(raw_papers, require_venue=True)
     if len(filtered) < batch_size:
         print(f"  탑티어 논문 부족({len(filtered)}편) — 최신 논문으로 보완")
@@ -406,25 +627,34 @@ def main():
         return
 
     batch = filtered[:batch_size]
-    print(f"{len(batch)}편 요약 시작...")
+    print(f"\n{len(batch)}편 처리 시작...")
 
     summaries = []
     pdf_paths = []
+    figures_per_paper = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
         for i, p in enumerate(batch, 1):
             venue_info = f"({p['venue']})" if p.get("venue") else "(학회 미확인)"
-            print(f"  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
+            print(f"\n  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
 
+            # 1. 요약 생성
             summary = summarize_paper(p)
             summaries.append(summary)
 
+            # 2. PDF에서 핵심 그림 추출
+            figures = get_key_figures(p, tmpdir)
+            figures_per_paper.append(figures)
+
+            # 3. 요약 PDF 생성 (그림 포함)
             safe_title = re.sub(r'[^\w\s-]', '', p['title'])[:40].strip()
             pdf_path = os.path.join(tmpdir, f"{i:02d}_{safe_title}.pdf")
-            create_paper_pdf(p, summary, pdf_path)
+            create_paper_pdf(p, summary, figures, pdf_path)
             pdf_paths.append(pdf_path)
+            print(f"    PDF 생성 완료 (그림 {len(figures)}개 포함)")
 
-        html = build_email_html(batch, summaries)
+        # 4. 이메일 발송
+        html = build_email_html(batch, summaries, figures_per_paper)
         date_str = datetime.now().strftime("%m/%d")
         venue_names = list({p["venue"] for p in batch if p.get("venue")})
         venue_str = f" | {', '.join(venue_names)}" if venue_names else ""
@@ -433,7 +663,7 @@ def main():
             html, pdf_paths,
         )
 
-    print("이메일 발송 완료 (PDF 첨부 포함)")
+    print("\n이메일 발송 완료 (PDF + 핵심 그림 첨부)")
 
     state["sent_papers"] = state.get("sent_papers", []) + [p["id"] for p in batch]
     state["pending_feedback"] = [{"id": p["id"], "title": p["title"]} for p in batch]
