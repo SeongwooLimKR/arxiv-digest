@@ -22,12 +22,22 @@ client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 # ── 탑티어 학회 목록 ──────────────────────────────────────────────────────
 TOP_VENUES = {
-    "NeurIPS", "ICML", "ICLR", "AAAI", "IJCAI",
-    "ACL", "EMNLP", "NAACL", "COLING", "EACL",
-    "CVPR", "ICCV", "ECCV",
-    "ICRA", "IROS", "RSS",
-    "KDD", "WWW", "SIGIR", "WSDM", "RecSys",
-    "JMLR", "TACL", "Nature", "Science",
+    # AI/ML 일반
+    "NeurIPS", "ICML", "ICLR", "AAAI", "IJCAI", "AISTATS", "UAI", "ECML",
+    # NLP
+    "ACL", "EMNLP", "NAACL", "COLING", "EACL", "CoNLL",
+    # Computer Vision
+    "CVPR", "ICCV", "ECCV", "WACV", "BMVC",
+    # Multimodal / Speech
+    "ICASSP", "Interspeech",
+    # Robotics
+    "ICRA", "IROS", "RSS", "CoRL",
+    # Data Mining / IR / Web
+    "KDD", "WWW", "SIGIR", "WSDM", "RecSys", "CIKM",
+    # Systems / LLM 인프라
+    "MLSys", "OSDI", "SOSP", "EuroSys",
+    # 저널
+    "JMLR", "TACL", "TMLR", "TPAMI", "IJCV", "Nature", "Science",
 }
 
 # ── 그림 선별 기준 ────────────────────────────────────────────────────────
@@ -37,16 +47,22 @@ MIN_IMG_HEIGHT = 80    # px
 # 논문당 최대 선별 그림 수
 MAX_FIGURES_PER_PAPER = 3
 
-# ── 캡션 기반 선별 프롬프트 ───────────────────────────────────────────────
-FIGURE_FILTER_PROMPT = """다음은 AI/ML 논문에서 추출한 그림들의 캡션 목록이야.
-각 그림이 논문의 방법론이나 핵심 개념을 이해하는 데 핵심적으로 도움이 되는지 판단해줘.
+# ── 그림 선별 프롬프트 (캡션 + 본문 언급 맥락 활용) ─────────────────────
+FIGURE_FILTER_PROMPT = """다음은 AI/ML 논문에서 추출한 그림 정보야.
+각 항목에는 캡션(Figure 아래 설명)과 본문에서 해당 그림을 언급한 문장들이 있어.
+이 두 가지를 함께 보고, 각 그림이 논문의 방법론이나 핵심 개념 이해에 핵심적으로 도움이 되는지 판단해줘.
 
 선택 기준:
-- 포함: 모델 아키텍처, 전체 파이프라인, 핵심 알고리즘 흐름, 주요 실험 결과 비교표/그래프
-- 제외: 단순 예시 이미지, 관련 없는 배경 설명, 세부 ablation 결과, 데이터셋 샘플
+- 포함: 모델 아키텍처, 전체 파이프라인, 핵심 알고리즘 흐름, 주요 실험 결과 비교 그래프/표
+- 제외: 단순 예시 이미지, 동기 부여용 배경 설명, 세부 ablation 결과, 데이터셋 샘플 이미지
 
-캡션 목록:
-{captions}
+판단 팁:
+- 본문에서 "Figure N shows our proposed ...", "As shown in Figure N, the model ..." 처럼
+  제안 방법을 직접 설명할 때 언급되면 핵심 그림일 가능성이 높음
+- 본문 언급 횟수가 많을수록 중요한 그림
+
+그림 정보:
+{figure_info}
 
 아래 JSON만 반환해줘. 설명 없이 JSON만.
 {{"selected": [포함할 그림의 인덱스(0부터 시작) 배열]}}
@@ -204,8 +220,11 @@ def download_arxiv_pdf(arxiv_id: str, dest_path: str) -> bool:
 
 
 def extract_figures_with_captions(pdf_path: str) -> list:
-    """pymupdf로 PDF에서 그림+캡션을 추출.
-    반환: [{"index": int, "caption": str, "image_bytes": bytes, "ext": str}, ...]
+    """pymupdf로 PDF에서 그림 + 캡션 + 본문 언급 문장을 추출.
+    반환: [{
+        "index": int, "caption": str, "body_mentions": [str, ...],
+        "image_bytes": bytes, "ext": str, "width": int, "height": int
+    }, ...]
     """
     try:
         import fitz  # pymupdf
@@ -219,16 +238,18 @@ def extract_figures_with_captions(pdf_path: str) -> list:
     except Exception:
         return []
 
-    # 전체 텍스트를 페이지별로 수집 (캡션 매칭용)
+    # 전체 텍스트 페이지별 수집
     page_texts = []
     for page in doc:
         page_texts.append(page.get_text("text"))
+
+    # 전체 본문 텍스트 (본문 언급 검색용)
+    full_text = "\n".join(page_texts)
 
     fig_index = 0
     for page_num, page in enumerate(doc):
         page_text = page_texts[page_num]
 
-        # 페이지에서 이미지 목록 추출
         img_list = page.get_images(full=True)
         for img_info in img_list:
             xref = img_info[0]
@@ -238,21 +259,24 @@ def extract_figures_with_captions(pdf_path: str) -> list:
                 continue
 
             w, h = base_image["width"], base_image["height"]
-            # 너무 작은 이미지(아이콘, 로고 등) 제외
             if w < MIN_IMG_WIDTH or h < MIN_IMG_HEIGHT:
                 continue
-            # 가로/세로 비율이 너무 극단적인 것 제외 (구분선 등)
             ratio = w / h if h > 0 else 0
             if ratio > 10 or ratio < 0.1:
                 continue
 
-            # 해당 페이지에서 Figure 캡션 찾기
-            # "Figure N", "Fig. N", "Fig N" 패턴 탐색
-            caption = _find_caption_for_figure(page_text, fig_index + 1)
+            fig_num = fig_index + 1
+
+            # 1. 캡션 추출 (그림 바로 아래 설명)
+            caption = _find_caption_for_figure(page_text, fig_num)
+
+            # 2. 본문 언급 문장 추출 (캡션 외 본문에서 해당 Figure를 인용한 문장들)
+            body_mentions = _find_body_mentions(full_text, fig_num, caption)
 
             results.append({
                 "index": fig_index,
                 "caption": caption,
+                "body_mentions": body_mentions,
                 "image_bytes": base_image["image"],
                 "ext": base_image["ext"],
                 "width": w,
@@ -275,31 +299,78 @@ def _find_caption_for_figure(page_text: str, fig_num: int) -> str:
     for pat in patterns:
         m = re.search(pat, page_text, re.IGNORECASE | re.DOTALL)
         if m:
-            caption = m.group(1).strip()
-            # 줄바꿈 정리, 최대 200자
-            caption = re.sub(r'\s+', ' ', caption)[:200]
+            caption = re.sub(r'\s+', ' ', m.group(1).strip())[:200]
             return caption
     return ""
 
 
+def _find_body_mentions(full_text: str, fig_num: int, caption: str) -> list:
+    """전체 본문에서 Figure N을 언급하는 문장을 추출.
+    캡션 자체는 제외하고, 본문에서 인용되는 문장만 수집.
+    최대 4문장 반환.
+    """
+    # Figure N 언급 패턴 (괄호 포함: (Figure 3), (Fig. 3) 등)
+    patterns = [
+        rf"[^.]*(?:Figure|Fig\.?)\s+{fig_num}[^.]*\.",
+        rf"[^.]*\((?:Figure|Fig\.?)\s+{fig_num}\)[^.]*\.",
+    ]
+
+    mentions = []
+    seen = set()
+    for pat in patterns:
+        for m in re.finditer(pat, full_text, re.IGNORECASE):
+            sentence = re.sub(r'\s+', ' ', m.group(0).strip())
+            # 캡션 자체와 중복 제거
+            if caption and caption[:40] in sentence:
+                continue
+            # 너무 짧거나 이미 수집한 문장 제외
+            if len(sentence) < 20 or sentence in seen:
+                continue
+            seen.add(sentence)
+            mentions.append(sentence[:200])
+            if len(mentions) >= 4:
+                break
+        if len(mentions) >= 4:
+            break
+
+    return mentions
+
+
 def select_key_figures(figures: list, max_count: int = MAX_FIGURES_PER_PAPER) -> list:
-    """캡션 텍스트를 Claude에게 보내서 핵심 그림만 선별."""
+    """캡션 + 본문 언급 맥락을 Claude에게 보내서 핵심 그림 선별."""
     if not figures:
         return []
 
-    # 캡션이 있는 것만 후보로 (캡션 없는 그림은 판단 불가)
-    candidates = [f for f in figures if f["caption"]]
+    # 캡션이나 본문 언급이 하나라도 있는 것만 후보로
+    candidates = [f for f in figures if f.get("caption") or f.get("body_mentions")]
     if not candidates:
-        # 캡션 없으면 크기 기준 상위 max_count개 반환
+        # 둘 다 없으면 크기 기준 상위 max_count개 반환
         return sorted(figures, key=lambda x: x["width"] * x["height"], reverse=True)[:max_count]
 
-    # 캡션 목록 구성
-    captions_text = "\n".join(
-        f"[{i}] {f['caption']}" for i, f in enumerate(candidates)
-    )
+    # 각 그림의 캡션 + 본문 언급을 구조화해서 전달
+    figure_info_parts = []
+    for i, f in enumerate(candidates):
+        parts = [f"[그림 {i}]"]
+
+        if f.get("caption"):
+            parts.append(f"  캡션: {f['caption']}")
+        else:
+            parts.append("  캡션: 없음")
+
+        mentions = f.get("body_mentions", [])
+        if mentions:
+            parts.append(f"  본문 언급 ({len(mentions)}회):")
+            for m in mentions:
+                parts.append(f"    - {m}")
+        else:
+            parts.append("  본문 언급: 없음")
+
+        figure_info_parts.append("\n".join(parts))
+
+    figure_info_text = "\n\n".join(figure_info_parts)
 
     prompt = FIGURE_FILTER_PROMPT.format(
-        captions=captions_text,
+        figure_info=figure_info_text,
         max_count=max_count,
     )
 
