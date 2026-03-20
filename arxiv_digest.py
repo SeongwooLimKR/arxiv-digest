@@ -1,4 +1,4 @@
-import os, json, smtplib, feedparser, requests, re, tempfile, io
+import os, json, smtplib, feedparser, requests, re, tempfile, io, time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -129,38 +129,152 @@ def save_state(state: dict):
 
 # ── 논문 수집 ─────────────────────────────────────────────────────────────
 
-def fetch_papers(keywords: list, max_per_kw: int, exclude_ids: list) -> list:
+SS_FIELDS = "title,authors,abstract,year,venue,publicationVenue,externalIds,referenceCount,citationCount"
+SS_BASE   = "https://api.semanticscholar.org/graph/v1"
+
+
+def _ss_paper_to_dict(data: dict, source: str) -> dict | None:
+    """Semantic Scholar 응답을 내부 paper dict으로 변환."""
+    ext = data.get("externalIds") or {}
+    arxiv_id = ext.get("ArXiv")
+    if not arxiv_id:
+        return None
+
+    authors = data.get("authors") or []
+    author_str = ", ".join(a.get("name", "") for a in authors[:3])
+
+    venue = data.get("venue", "") or ""
+    pub_venue = data.get("publicationVenue") or {}
+    venue_name = pub_venue.get("name", venue) or venue
+
+    return {
+        "id": arxiv_id,
+        "title": (data.get("title") or "").replace("\n", " ").strip(),
+        "authors": author_str,
+        "abstract": (data.get("abstract") or "")[:1500],
+        "url": f"https://arxiv.org/abs/{arxiv_id}",
+        "published": str(data.get("year") or ""),
+        "keyword": source,
+        "venue": venue_name.strip() if venue_name else None,
+        "venue_year": data.get("year"),
+    }
+
+
+def fetch_seed_papers(seed_ids: list, exclude_ids: set) -> list:
+    """시드 논문 자체를 가져옴 (아직 보내지 않은 것만)."""
     papers = []
-    seen_ids = set(exclude_ids)
-    for kw in keywords:
-        query = kw.replace(" ", "+")
-        url = (
-            f"http://export.arxiv.org/api/query"
-            f"?search_query=all:{query}"
-            f"&sortBy=submittedDate&sortOrder=descending&max_results=30"
-        )
-        feed = feedparser.parse(url)
-        count = 0
-        for entry in feed.entries:
-            pid = entry.id.split("/abs/")[-1]
-            if pid in seen_ids:
+    for arxiv_id in seed_ids:
+        clean_id = arxiv_id.split("v")[0].strip()
+        if clean_id in exclude_ids:
+            continue
+        try:
+            url  = f"{SS_BASE}/paper/arXiv:{clean_id}"
+            resp = requests.get(url, params={"fields": SS_FIELDS}, timeout=10)
+            if resp.status_code != 200:
                 continue
-            papers.append({
-                "id": pid,
-                "title": entry.title.replace("\n", " ").strip(),
-                "authors": ", ".join(a.name for a in entry.authors[:3]),
-                "abstract": entry.summary[:1500],
-                "url": entry.link,
-                "published": entry.published[:10],
-                "keyword": kw,
-                "venue": None,
-                "venue_year": None,
-            })
-            seen_ids.add(pid)
-            count += 1
-            if count >= max_per_kw:
-                break
+            p = _ss_paper_to_dict(resp.json(), source="시드 논문")
+            if p:
+                papers.append(p)
+                exclude_ids.add(clean_id)
+            time.sleep(0.3)
+        except Exception:
+            continue
     return papers
+
+
+def fetch_citing_papers(seed_ids: list, exclude_ids: set, max_per_seed: int = 5) -> list:
+    """시드 논문들을 인용한 최신 논문 수집."""
+    papers = []
+    for arxiv_id in seed_ids:
+        clean_id = arxiv_id.split("v")[0].strip()
+        try:
+            url  = f"{SS_BASE}/paper/arXiv:{clean_id}/citations"
+            resp = requests.get(url, params={
+                "fields": SS_FIELDS,
+                "limit": 50,
+            }, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            count = 0
+            # 최신순 정렬 (year 내림차순)
+            citations = sorted(
+                data.get("data", []),
+                key=lambda x: x.get("citingPaper", {}).get("year") or 0,
+                reverse=True,
+            )
+            for item in citations:
+                citing = item.get("citingPaper", {})
+                p = _ss_paper_to_dict(citing, source=f"인용 (arXiv:{clean_id})")
+                if p and p["id"] not in exclude_ids:
+                    papers.append(p)
+                    exclude_ids.add(p["id"])
+                    count += 1
+                    if count >= max_per_seed:
+                        break
+            time.sleep(0.3)
+        except Exception:
+            continue
+    return papers
+
+
+def fetch_keyword_papers_ss(keywords: list, exclude_ids: set, max_per_kw: int = 10) -> list:
+    """Semantic Scholar 키워드 검색으로 논문 수집."""
+    papers = []
+    for kw in keywords:
+        try:
+            url  = f"{SS_BASE}/paper/search"
+            resp = requests.get(url, params={
+                "query": kw,
+                "fields": SS_FIELDS,
+                "limit": max_per_kw * 2,  # 필터링 여유분
+            }, timeout=10)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            count = 0
+            for item in data.get("data", []):
+                p = _ss_paper_to_dict(item, source=kw)
+                if p and p["id"] not in exclude_ids:
+                    papers.append(p)
+                    exclude_ids.add(p["id"])
+                    count += 1
+                    if count >= max_per_kw:
+                        break
+            time.sleep(0.3)
+        except Exception:
+            continue
+    return papers
+
+
+def fetch_all_papers(state: dict) -> list:
+    """시드 논문 + 인용 논문 + 키워드 검색을 병행해서 후보 논문 수집."""
+    exclude_ids = set(p.split("v")[0] for p in state.get("sent_papers", []))
+    seed_ids    = state.get("seed_papers", [])
+    keywords    = state.get("keywords", [])
+
+    all_papers = []
+
+    # 1. 아직 안 보낸 시드 논문 포함
+    if seed_ids:
+        seeds = fetch_seed_papers(seed_ids, exclude_ids)
+        print(f"  시드 논문: {len(seeds)}편")
+        all_papers.extend(seeds)
+
+    # 2. 시드 논문을 인용한 최신 논문
+    if seed_ids:
+        citing = fetch_citing_papers(seed_ids, exclude_ids, max_per_seed=5)
+        print(f"  인용 논문: {len(citing)}편")
+        all_papers.extend(citing)
+
+    # 3. Semantic Scholar 키워드 검색
+    if keywords:
+        kw_papers = fetch_keyword_papers_ss(keywords, exclude_ids, max_per_kw=8)
+        print(f"  키워드 검색: {len(kw_papers)}편")
+        all_papers.extend(kw_papers)
+
+    print(f"  총 후보: {len(all_papers)}편")
+    return all_papers
 
 
 # ── 학회 필터링 ───────────────────────────────────────────────────────────
@@ -696,6 +810,7 @@ def commit_state():
 # ── 메인 ─────────────────────────────────────────────────────────────────
 
 def main():
+    import time as _time
     state = load_state()
 
     if state.get("waiting_for_feedback"):
@@ -704,21 +819,20 @@ def main():
 
     batch_size = state.get("batch_size", 4)
 
-    # 1차: 키워드당 10편 검색
-    raw_papers = fetch_papers(
-        state["keywords"], max_per_kw=10,
-        exclude_ids=state.get("sent_papers", []),
-    )
-    filtered = enrich_and_filter_papers(raw_papers, require_venue=True)
+    print("논문 수집 중...")
+    candidates = fetch_all_papers(state)
 
-    # 탑티어 부족하면 검색 범위를 넓혀서 재시도 (아카이브 논문은 절대 포함 안 함)
+    # 학회 필터링 (Semantic Scholar에서 이미 venue 정보 포함)
+    filtered = [p for p in candidates if is_top_venue(p.get("venue", ""))]
+    print(f"  탑티어 학회 논문: {len(filtered)}편")
+
+    # 탑티어 부족하면 시드 논문은 학회 무관하게 포함
     if len(filtered) < batch_size:
-        print(f"  탑티어 논문 부족({len(filtered)}편) — 검색 범위 확대 재시도")
-        raw_papers = fetch_papers(
-            state["keywords"], max_per_kw=30,
-            exclude_ids=state.get("sent_papers", []),
-        )
-        filtered = enrich_and_filter_papers(raw_papers, require_venue=True)
+        seed_papers = [p for p in candidates
+                       if p.get("keyword") == "시드 논문"
+                       and p not in filtered]
+        filtered = filtered + seed_papers
+        print(f"  시드 논문 추가 후: {len(filtered)}편")
 
     if not filtered:
         print("새 논문 없음")
@@ -736,22 +850,18 @@ def main():
             venue_info = f"({p['venue']})" if p.get("venue") else "(학회 미확인)"
             print(f"\n  [{i}/{len(batch)}] {p['title'][:55]}... {venue_info}")
 
-            # 1. 요약 생성
             summary = summarize_paper(p)
             summaries.append(summary)
 
-            # 2. PDF에서 핵심 그림 추출
             figures = get_key_figures(p, tmpdir)
             figures_per_paper.append(figures)
 
-            # 3. 요약 PDF 생성 (그림 포함)
             safe_title = re.sub(r'[^\w\s-]', '', p['title'])[:40].strip()
             pdf_path = os.path.join(tmpdir, f"{i:02d}_{safe_title}.pdf")
             create_paper_pdf(p, summary, figures, pdf_path)
             pdf_paths.append(pdf_path)
             print(f"    PDF 생성 완료 (그림 {len(figures)}개 포함)")
 
-        # 4. 이메일 발송
         html = build_email_html(batch, summaries, figures_per_paper, state["keywords"])
         date_str = datetime.now().strftime("%m/%d")
         venue_names = list({p["venue"] for p in batch if p.get("venue")})

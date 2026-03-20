@@ -1,15 +1,32 @@
 {
   "keywords": [
-    "Statistical Relational Learning",
-    "Markov Logic Networks",
-    "Probabilistic Logic",
-    "Lifted Inference",
-    "Integrated Gradients"
+    "lifted inference first-order logic",
+    "probabilistic logic programming",
+    "domain size generalization probabilistic model",
+    "integrated gradients feature attribution",
+    "interpolation path attribution explainability"
   ],
   "batch_size": 4,
   "sent_papers": [],
   "pending_feedback": [],
   "waiting_for_feedback": false,
   "feedback_history": [],
-  "processed_message_ids": []
+  "processed_message_ids": [],
+  "seed_papers": [
+    "2211.01164",
+    "2508.11515",
+    "2204.04009",
+    "1807.01082",
+    "2403.15933",
+    "1412.1505",
+    "2403.10184",
+    "1703.01365",
+    "2106.09788",
+    "2406.10852",
+    "2303.14242",
+    "2202.11912",
+    "2412.18844",
+    "2305.20052",
+    "2305.14395"
+  ]
 }
