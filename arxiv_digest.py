@@ -68,16 +68,6 @@ Step-by-step으로 상세히 설명. 압축하지 말고 각 단계를 충분히
 저자: {authors}
 초록: {abstract}"""
 
-# ── 한 줄 요약 프롬프트 (이메일 본문용) ──────────────────────────────────
-ONE_LINE_PROMPT = """다음 논문을 한국어로 두 문장으로 요약해줘.
-첫 문장: 이 논문이 해결하는 문제와 핵심 아이디어.
-두 번째 문장: 주요 결과나 의의.
-두 문장만 출력하고 다른 설명은 하지 마.
-
-제목: {title}
-초록: {abstract}"""
-
-
 # ── State 관리 ────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
@@ -231,17 +221,21 @@ def summarize_paper(paper: dict) -> str:
     )
     return msg.content[0].text
 
-def one_line_summary(paper: dict) -> str:
-    """두 문장 요약 (이메일 본문용)."""
-    msg = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=200,
-        messages=[{"role": "user", "content": ONE_LINE_PROMPT.format(
-            title=paper["title"],
-            abstract=paper["abstract"],
-        )}],
+def extract_goal_section(summary: str) -> str:
+    """요약 텍스트에서 '목표 Task' 섹션 내용만 추출 (이메일 본문용)."""
+    # ## 🎯 목표 Task 또는 ## 목표 Task 패턴 이후 다음 ## 전까지 추출
+    match = re.search(
+        r'##\s*[🎯]?\s*목표\s*Task\s*\n([\s\S]+?)(?=\n##|\Z)',
+        summary, re.IGNORECASE
     )
-    return msg.content[0].text.strip()
+    if match:
+        content = match.group(1).strip()
+        # 너무 길면 400자로 자르고 말줄임표
+        if len(content) > 400:
+            content = content[:400].rsplit(".", 1)[0] + "..."
+        return content
+    # 섹션을 못 찾으면 첫 200자 반환
+    return summary[:200].strip() + "..."
 
 
 # ── MD 파일 생성 ──────────────────────────────────────────────────────────
@@ -421,8 +415,8 @@ def main():
 
             # 전체 요약 (MD용)
             summary   = summarize_paper(p)
-            # 두 문장 요약 (이메일 본문용)
-            one_liner = one_line_summary(p)
+            # 목표 Task 섹션 추출 (이메일 본문용) — API 추가 호출 없음
+            one_liner = extract_goal_section(summary)
             one_liners.append(one_liner)
 
             # MD 파일 생성
