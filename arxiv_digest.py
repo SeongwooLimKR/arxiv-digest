@@ -704,15 +704,21 @@ def main():
 
     batch_size = state.get("batch_size", 4)
 
+    # 1차: 키워드당 10편 검색
     raw_papers = fetch_papers(
         state["keywords"], max_per_kw=10,
         exclude_ids=state.get("sent_papers", []),
     )
-
     filtered = enrich_and_filter_papers(raw_papers, require_venue=True)
+
+    # 탑티어 부족하면 검색 범위를 넓혀서 재시도 (아카이브 논문은 절대 포함 안 함)
     if len(filtered) < batch_size:
-        print(f"  탑티어 논문 부족({len(filtered)}편) — 최신 논문으로 보완")
-        filtered = enrich_and_filter_papers(raw_papers, require_venue=False)
+        print(f"  탑티어 논문 부족({len(filtered)}편) — 검색 범위 확대 재시도")
+        raw_papers = fetch_papers(
+            state["keywords"], max_per_kw=30,
+            exclude_ids=state.get("sent_papers", []),
+        )
+        filtered = enrich_and_filter_papers(raw_papers, require_venue=True)
 
     if not filtered:
         print("새 논문 없음")

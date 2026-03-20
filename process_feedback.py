@@ -151,34 +151,23 @@ def commit_state():
         subprocess.run(["git", "push"], check=True)
 
 
-def main():
-    state = load_state()
-
-    if not state.get("waiting_for_feedback"):
-        print("피드백 대기 상태 아님 — 건너뜀")
-        return
-
-    print("📨 Gmail에서 회신 확인 중...")
-    service = get_gmail_service()
+def process_once(state: dict, service) -> bool:
+    """회신 한 번 확인 후 처리. 처리 완료 시 True, 아직 없으면 False 반환."""
     reply, msg_id = find_latest_digest_reply(service)
 
     if not reply:
-        print("새 회신 없음")
-        return
+        return False
 
-    # 이미 처리한 메시지인지 확인
     processed_ids = state.get("processed_message_ids", [])
     if msg_id in processed_ids:
-        print("이미 처리한 회신 — 건너뜀")
-        return
+        return False
 
-    print(f"📨 회신 발견 (길이: {len(reply)}자)")
-    print(f"회신 내용 미리보기: {reply[:200]}...")
+    print(f"회신 발견 (길이: {len(reply)}자)")
+    print(f"미리보기: {reply[:200]}...")
 
     result = parse_feedback(state, reply)
-    print(f"📊 분석 결과: {result['changes_made']}")
+    print(f"분석 결과: {result['changes_made']}")
 
-    # state 업데이트
     state["keywords"] = result["new_keywords"]
     state["feedback_history"] = state.get("feedback_history", []) + [{
         "date": datetime.now().isoformat(),
@@ -189,13 +178,50 @@ def main():
     }]
     state["pending_feedback"] = []
     state["waiting_for_feedback"] = False
-    state["processed_message_ids"] = processed_ids + [msg_id]
-    # 처리된 ID 목록은 최근 50개만 유지
-    state["processed_message_ids"] = state["processed_message_ids"][-50:]
+    state["processed_message_ids"] = (processed_ids + [msg_id])[-50:]
 
     save_state(state)
     commit_state()
-    print(f"✅ 완료 — 업데이트된 키워드: {state['keywords']}")
+    print(f"완료 — 업데이트된 키워드: {state['keywords']}")
+    return True
+
+
+def main():
+    import time
+
+    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))   # 기본 5분
+    poll_timeout  = int(os.environ.get("POLL_TIMEOUT_SECONDS", "43200"))  # 기본 12시간
+
+    state = load_state()
+
+    if not state.get("waiting_for_feedback"):
+        print("피드백 대기 상태 아님 — 종료")
+        return
+
+    print(f"Gmail 폴링 시작 (간격: {poll_interval//60}분, 최대 대기: {poll_timeout//3600}시간)")
+    service = get_gmail_service()
+
+    elapsed = 0
+    while elapsed < poll_timeout:
+        print(f"[{elapsed//60}분 경과] 회신 확인 중...")
+
+        # state를 매 루프마다 새로 읽기 (외부에서 변경될 수 있으므로)
+        state = load_state()
+
+        if not state.get("waiting_for_feedback"):
+            print("피드백 대기 상태 해제됨 — 종료")
+            return
+
+        done = process_once(state, service)
+        if done:
+            print("피드백 처리 완료 — 종료")
+            return
+
+        print(f"회신 없음 — {poll_interval//60}분 후 재확인")
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+    print(f"최대 대기 시간({poll_timeout//3600}시간) 초과 — 종료")
 
 
 if __name__ == "__main__":
