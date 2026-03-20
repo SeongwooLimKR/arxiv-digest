@@ -7,31 +7,9 @@
     "Integrated Gradients"
   ],
   "batch_size": 4,
-  "sent_papers": [
-    "2603.19235v1",
-    "2603.19234v1",
-    "2603.19232v1",
-    "2603.19229v1"
-  ],
-  "pending_feedback": [
-    {
-      "id": "2603.19235v1",
-      "title": "Generation Models Know Space: Unleashing Implicit 3D Priors for Scene Understanding"
-    },
-    {
-      "id": "2603.19234v1",
-      "title": "Matryoshka Gaussian Splatting"
-    },
-    {
-      "id": "2603.19232v1",
-      "title": "Cubic Discrete Diffusion: Discrete Visual Generation on High-Dimensional Representation Tokens"
-    },
-    {
-      "id": "2603.19229v1",
-      "title": "NavTrust: Benchmarking Trustworthiness for Embodied Navigation"
-    }
-  ],
-  "waiting_for_feedback": true,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
   "feedback_history": [],
   "processed_message_ids": []
 }
