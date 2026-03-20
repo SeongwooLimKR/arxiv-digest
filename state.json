@@ -7,9 +7,31 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 4,
-  "sent_papers": [],
-  "pending_feedback": [],
-  "waiting_for_feedback": false,
+  "sent_papers": [
+    "2204.04009",
+    "2407.11877",
+    "2403.15933",
+    "2505.19648"
+  ],
+  "pending_feedback": [
+    {
+      "id": "2204.04009",
+      "title": "On Projectivity in Markov Logic Networks"
+    },
+    {
+      "id": "2407.11877",
+      "title": "Bridging Weighted First Order Model Counting and Graph Polynomials"
+    },
+    {
+      "id": "2403.15933",
+      "title": "Understanding Domain-Size Generalization in Markov Logic Networks"
+    },
+    {
+      "id": "2505.19648",
+      "title": "Model Enumeration of Two-Variable Logic with Quadratic Delay Complexity"
+    }
+  ],
+  "waiting_for_feedback": true,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
