@@ -208,11 +208,18 @@ print(f'배치 크기 변경: {$n}편')
 }
 
 cmd_run() {
-    echo -e "${YELLOW}지금 바로 다이제스트 발송을 실행합니다...${NC}"
-    gh workflow run daily_digest.yml --repo "$(gh api user --jq '.login')/arxiv-digest"
+    local REPO="$(gh api user --jq '.login')/arxiv-digest"
+    echo -e "${YELLOW}다이제스트 발송 + 피드백 폴링을 시작합니다...${NC}"
+
+    gh workflow run daily_digest.yml --repo "$REPO"
+    echo -e "${GREEN}  ✅ 논문 발송 워크플로우 시작${NC}"
+
+    gh workflow run process_feedback.yml --repo "$REPO"
+    echo -e "${GREEN}  ✅ 피드백 폴링 워크플로우 시작${NC}"
+
     echo ""
     echo "30초 후 결과 확인:"
-    echo "  gh run list --repo \$(gh api user --jq '.login')/arxiv-digest"
+    echo "  ./manage.sh logs"
 }
 
 cmd_logs() {
