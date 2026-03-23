@@ -198,29 +198,49 @@ def process_once(state: dict, service) -> bool:
 def main():
     import time
 
-    poll_interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))  # 기본 5분
+    poll_interval  = int(os.environ.get("POLL_INTERVAL_SECONDS", "300"))  # 기본 5분
+    reconnect_mins = 50  # 50분마다 Gmail 서비스 재연결 (1시간 전에 끊기 전에)
 
     print(f"Gmail 폴링 시작 (간격: {poll_interval//60}분)")
-    service = get_gmail_service()
 
-    elapsed = 0
+    service = get_gmail_service()
+    elapsed       = 0
+    last_reconnect = 0
+
     while True:
         print(f"[{elapsed//60}분 경과] 회신 확인 중...")
 
-        state = load_state()
+        # 50분마다 Gmail 서비스 재연결 (SSL 타임아웃 방지)
+        if elapsed - last_reconnect >= reconnect_mins * 60:
+            try:
+                print("Gmail 서비스 재연결 중...")
+                service = get_gmail_service()
+                last_reconnect = elapsed
+                print("재연결 완료")
+            except Exception as e:
+                print(f"재연결 실패: {e} — 기존 연결 유지")
 
-        if not state.get("waiting_for_feedback"):
-            print("피드백 대기 상태 아님 — 5분 후 재확인")
-        else:
-            done = process_once(state, service)
-            if done:
-                print("피드백 처리 + 다음 배치 발송 완료 — 폴링 계속")
-                elapsed = 0  # 타이머 리셋
-                time.sleep(poll_interval)
-                elapsed += poll_interval
-                continue
+        try:
+            state = load_state()
 
-        print(f"대기 중 — {poll_interval//60}분 후 재확인")
+            if not state.get("waiting_for_feedback"):
+                print("피드백 대기 상태 아님 — 재확인 대기")
+            else:
+                done = process_once(state, service)
+                if done:
+                    print("피드백 처리 + 다음 배치 발송 완료 — 폴링 계속")
+                    elapsed = 0
+                    last_reconnect = 0
+                    service = get_gmail_service()  # 발송 후 재연결
+
+        except Exception as e:
+            print(f"에러 발생: {e} — 재연결 후 재시도")
+            try:
+                service = get_gmail_service()
+                last_reconnect = elapsed
+            except Exception as e2:
+                print(f"재연결도 실패: {e2}")
+
         time.sleep(poll_interval)
         elapsed += poll_interval
 
