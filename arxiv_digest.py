@@ -208,8 +208,25 @@ def is_top_venue(venue: str) -> bool:
 
 # ── 요약 생성 ─────────────────────────────────────────────────────────────
 
+VERIFY_PROMPT = """다음은 논문 초록과 AI가 생성한 논문 요약이야.
+요약에서 초록에 명시되지 않은 내용을 추측하거나 hallucinate한 부분이 있으면 수정해줘.
+
+규칙:
+- 초록에 없는 구체적 알고리즘명, 기법명, 수식이 요약에 나오면 "논문에서 명확히 서술되지 않음 (초록 기준)" 으로 대체
+- 초록에서 유추 가능한 일반적 설명은 유지해도 됨
+- 수정이 필요 없으면 요약을 그대로 반환
+- 요약 전체를 그대로 반환 (설명 없이)
+
+논문 제목: {title}
+논문 초록: {abstract}
+
+AI 생성 요약:
+{summary}"""
+
+
 def summarize_paper(paper: dict) -> str:
-    """7섹션 전체 요약 (MD 파일용)."""
+    """7섹션 전체 요약 생성 후 사실 검증."""
+    # 1단계: 요약 생성
     msg = client.messages.create(
         model="claude-opus-4-5",
         max_tokens=8192,
@@ -219,7 +236,19 @@ def summarize_paper(paper: dict) -> str:
             abstract=paper["abstract"],
         )}],
     )
-    return msg.content[0].text
+    summary = msg.content[0].text
+
+    # 2단계: 사실 검증 (초록 기준으로 hallucination 제거)
+    verify_msg = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=8192,
+        messages=[{"role": "user", "content": VERIFY_PROMPT.format(
+            title=paper["title"],
+            abstract=paper["abstract"],
+            summary=summary,
+        )}],
+    )
+    return verify_msg.content[0].text
 
 def _simple_md_to_html(text: str) -> str:
     """이메일 본문용 간단한 마크다운 → HTML 변환.
@@ -310,8 +339,20 @@ def create_paper_html(paper: dict, summary: str) -> str:
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
         venue_str = f"<br><strong>학회:</strong> {paper['venue']}{yr}"
 
-    # summary 안의 백틱을 JS 템플릿 리터럴과 충돌하지 않게 이스케이프
-    summary_escaped = summary.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+    # JS 문자열에 안전하게 삽입하기 위해 json.dumps로 이스케이프
+    # 저자명, 제목 등에 아포스트로피/따옴표가 있어도 안전
+    authors_js  = json.dumps(paper['authors'])
+    published_js = json.dumps(str(paper['published']))
+    venue_js    = json.dumps(venue_str)
+    url_js      = json.dumps(paper['url'])
+
+    # summary: 백틱(템플릿 리터럴), 백슬래시, $는 이스케이프
+    summary_escaped = (
+        summary
+        .replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("${", "\\${")   # JS 템플릿 표현식 ${...} 방지
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -373,22 +414,18 @@ MathJax = {{
 <div class="footer">생성일: {datetime.now().strftime('%Y-%m-%d')} | GitHub Actions + Claude API</div>
 
 <script>
-  // 제목·메타 삽입
   document.getElementById('title').textContent = {json.dumps(paper['title'])};
   document.getElementById('meta').innerHTML =
-    '<strong>저자:</strong> {paper["authors"]} &nbsp;|&nbsp; '
-    + '<strong>출판:</strong> {paper["published"]}'
-    + '{venue_str}'
-    + '<br><strong>arXiv:</strong> <a href="{paper["url"]}" target="_blank">{paper["url"]}</a>';
+    '<strong>저자:</strong> ' + {authors_js} + ' &nbsp;|&nbsp; '
+    + '<strong>출판:</strong> ' + {published_js}
+    + {venue_js}
+    + '<br><strong>arXiv:</strong> <a href="' + {url_js} + '" target="_blank">' + {url_js} + '</a>';
 
-  // marked 설정 — GFM(표, 코드블록 등) 활성화
   marked.setOptions({{ gfm: true, breaks: true }});
 
-  // 마크다운 → HTML 변환 후 삽입
   const raw = `{summary_escaped}`;
   document.getElementById('content').innerHTML = marked.parse(raw);
 
-  // MathJax 재실행 (marked가 DOM 변경 후)
   if (window.MathJax) MathJax.typesetPromise();
 </script>
 </body>
