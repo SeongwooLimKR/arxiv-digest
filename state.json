@@ -7,31 +7,9 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 4,
-  "sent_papers": [
-    "2211.01164",
-    "2204.04009",
-    "2305.20052",
-    "2511.09174"
-  ],
-  "pending_feedback": [
-    {
-      "id": "2211.01164",
-      "title": "Lifted Inference with Linear Order Axiom"
-    },
-    {
-      "id": "2204.04009",
-      "title": "On Projectivity in Markov Logic Networks"
-    },
-    {
-      "id": "2305.20052",
-      "title": "Integrated Decision Gradients: Compute Your Attributions Where the Model Makes Its Decision"
-    },
-    {
-      "id": "2511.09174",
-      "title": "Tractable Weighted First-Order Model Counting with Bounded Treewidth Binary Evidence"
-    }
-  ],
-  "waiting_for_feedback": true,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
