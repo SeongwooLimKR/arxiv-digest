@@ -487,9 +487,35 @@ MathJax = {{
 
   marked.setOptions({{ gfm: true, breaks: true }});
 
+  // 수식 블록을 플레이스홀더로 보호 → marked 실행 → 복원 → MathJax 렌더링
+  // marked.js가 수식 내부 _, *, ` 등을 마크다운으로 잘못 처리하는 것을 방지
   const raw = `{summary_escaped}`;
-  document.getElementById('content').innerHTML = marked.parse(raw);
+  const mathStore = [];
 
+  // 1단계: $$...$$ (display math) 를 플레이스홀더로 교체
+  let protected_ = raw.replace(/\$\$([\s\S]+?)\$\$/g, (match) => {{
+    const idx = mathStore.length;
+    mathStore.push(match);
+    return `MATHPLACEHOLDER_DISPLAY_${{idx}}_END`;
+  }});
+
+  // 2단계: $...$ (inline math) 를 플레이스홀더로 교체
+  protected_ = protected_.replace(/\$([^\$\n]+?)\$/g, (match) => {{
+    const idx = mathStore.length;
+    mathStore.push(match);
+    return `MATHPLACEHOLDER_INLINE_${{idx}}_END`;
+  }});
+
+  // 3단계: marked.js로 마크다운 → HTML 변환
+  let html = marked.parse(protected_);
+
+  // 4단계: 플레이스홀더를 원본 수식으로 복원
+  html = html.replace(/MATHPLACEHOLDER_DISPLAY_(\d+)_END/g, (_, idx) => mathStore[parseInt(idx)]);
+  html = html.replace(/MATHPLACEHOLDER_INLINE_(\d+)_END/g, (_, idx) => mathStore[parseInt(idx)]);
+
+  document.getElementById('content').innerHTML = html;
+
+  // 5단계: MathJax로 수식 렌더링
   if (window.MathJax) MathJax.typesetPromise();
 </script>
 </body>
