@@ -404,19 +404,13 @@ def create_paper_html(paper: dict, summary: str) -> str:
         venue_str = f"<br><strong>학회:</strong> {paper['venue']}{yr}"
 
     # JS 문자열에 안전하게 삽입하기 위해 json.dumps로 이스케이프
-    # 저자명, 제목 등에 아포스트로피/따옴표가 있어도 안전
-    authors_js  = json.dumps(paper['authors'])
+    authors_js   = json.dumps(paper['authors'])
     published_js = json.dumps(str(paper['published']))
-    venue_js    = json.dumps(venue_str)
-    url_js      = json.dumps(paper['url'])
-
-    # summary: 백틱(템플릿 리터럴), 백슬래시, $는 이스케이프
-    summary_escaped = (
-        summary
-        .replace("\\", "\\\\")
-        .replace("`", "\\`")
-        .replace("${", "\\${")   # JS 템플릿 표현식 ${...} 방지
-    )
+    venue_js     = json.dumps(venue_str)
+    url_js       = json.dumps(paper['url'])
+    # summary도 json.dumps로 인코딩 → JS에서 JSON.parse로 읽음
+    # 이렇게 하면 백슬래시 이중 처리 문제가 완전히 사라짐
+    summary_json = json.dumps(summary)
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -487,9 +481,8 @@ MathJax = {{
 
   marked.setOptions({{ gfm: true, breaks: true }});
 
-  // 수식 블록을 플레이스홀더로 보호 → marked 실행 → 복원 → MathJax 렌더링
-  // marked.js가 수식 내부 _, *, ` 등을 마크다운으로 잘못 처리하는 것을 방지
-  const raw = `{summary_escaped}`;
+  // summary를 JSON으로 파싱 → 백슬래시 이중 처리 문제 완전 해결
+  const raw = JSON.parse({summary_json});
   const mathStore = [];
 
   // 1단계: $$...$$ (display math) 를 플레이스홀더로 교체
