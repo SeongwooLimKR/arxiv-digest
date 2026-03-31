@@ -208,24 +208,66 @@ def is_top_venue(venue: str) -> bool:
 
 # ── 요약 생성 ─────────────────────────────────────────────────────────────
 
-VERIFY_PROMPT = """다음은 논문 초록과 AI가 생성한 논문 요약이야.
-요약에서 초록에 명시되지 않은 내용을 추측하거나 hallucinate한 부분이 있으면 수정해줘.
+VERIFY_PROMPT = """다음은 논문 전문(full text)과 AI가 생성한 논문 요약이야.
+요약에서 논문 전문에 없는 내용을 추측하거나 hallucinate한 부분이 있으면 수정해줘.
 
 규칙:
-- 초록에 없는 구체적 알고리즘명, 기법명, 수식이 요약에 나오면 "논문에서 명확히 서술되지 않음 (초록 기준)" 으로 대체
-- 초록에서 유추 가능한 일반적 설명은 유지해도 됨
+- 논문 전문에 없는 구체적 알고리즘명, 기법명, 수식, 주장이 요약에 나오면 "논문에서 명확히 서술되지 않음"으로 대체
+- 논문 전문에서 직접 확인되는 내용은 그대로 유지
+- 논문 전문에서 유추 가능한 일반적 설명은 유지해도 됨
 - 수정이 필요 없으면 요약을 그대로 반환
-- 요약 전체를 그대로 반환 (설명 없이)
+- 요약 전체를 그대로 반환 (설명 없이, 마크다운 형식 유지)
 
 논문 제목: {title}
-논문 초록: {abstract}
+
+논문 전문:
+{full_text}
 
 AI 생성 요약:
 {summary}"""
 
 
+def extract_paper_text(arxiv_id: str) -> str | None:
+    """arXiv PDF에서 전문 텍스트 추출. 실패 시 None 반환."""
+    try:
+        import fitz  # pymupdf
+        import tempfile
+
+        pid  = arxiv_id.split("v")[0]
+        url  = f"https://arxiv.org/pdf/{pid}.pdf"
+        resp = requests.get(url, timeout=30, stream=True)
+        if resp.status_code != 200:
+            return None
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
+            for chunk in resp.iter_content(8192):
+                f.write(chunk)
+            tmp_path = f.name
+
+        doc  = fitz.open(tmp_path)
+        text = "\n".join(page.get_text("text") for page in doc)
+        doc.close()
+
+        import os
+        os.unlink(tmp_path)
+
+        # 너무 길면 앞부분 위주로 잘라서 사용 (Claude 컨텍스트 한계 고려)
+        # 보통 논문은 본문이 앞에 있고, 참고문헌은 뒤에 있으므로 앞 80%만 사용
+        max_chars = 60000
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...(이하 생략)"
+
+        return text.strip()
+    except ImportError:
+        print("  pymupdf 없음 — 전문 검증 건너뜀")
+        return None
+    except Exception as e:
+        print(f"  PDF 텍스트 추출 실패: {e}")
+        return None
+
+
 def summarize_paper(paper: dict) -> str:
-    """7섹션 전체 요약 생성 후 사실 검증."""
+    """7섹션 전체 요약 생성 후 논문 전문 기반 사실 검증."""
     # 1단계: 요약 생성
     msg = client.messages.create(
         model="claude-opus-4-5",
@@ -238,13 +280,23 @@ def summarize_paper(paper: dict) -> str:
     )
     summary = msg.content[0].text
 
-    # 2단계: 사실 검증 (초록 기준으로 hallucination 제거)
+    # 2단계: PDF 전문 추출
+    print(f"    논문 전문 다운로드 중...")
+    full_text = extract_paper_text(paper["id"])
+
+    if not full_text:
+        # 전문 추출 실패 시 초록으로 폴백
+        print(f"    전문 추출 실패 — 초록으로 검증")
+        full_text = f"(전문 추출 실패, 초록만 사용)\n\n{paper['abstract']}"
+
+    # 3단계: 전문 기반 사실 검증
+    print(f"    사실 검증 중...")
     verify_msg = client.messages.create(
         model="claude-opus-4-5",
         max_tokens=8192,
         messages=[{"role": "user", "content": VERIFY_PROMPT.format(
             title=paper["title"],
-            abstract=paper["abstract"],
+            full_text=full_text,
             summary=summary,
         )}],
     )
