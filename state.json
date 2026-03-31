@@ -6,7 +6,7 @@
     "integrated gradients feature attribution",
     "interpolation path attribution explainability"
   ],
-  "batch_size": 4,
+  "batch_size": 2,
   "sent_papers": [],
   "pending_feedback": [],
   "waiting_for_feedback": false,
