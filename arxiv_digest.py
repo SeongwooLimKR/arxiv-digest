@@ -21,53 +21,6 @@ TOP_VENUES = {
     "JMLR", "TACL", "TMLR", "TPAMI", "IJCV", "Nature", "Science",
 }
 
-# ── 요약 프롬프트 ─────────────────────────────────────────────────────────
-SUMMARY_PROMPT = """학술 논문을 구조적으로 분석하여 핵심 내용을 한국어로 정리해줘.
-모델명·데이터셋명·평가 지표·알고리즘명 등 전문 용어는 영어 원문 유지.
-한국어로 번역 시 의미가 불명확한 개념은 한국어(영어) 형식으로 병기.
-수식은 LaTeX 형식($...$, $$...$$)으로 그대로 작성해줘. 표는 마크다운 표 형식으로 작성해줘.
-
-아래 7개 섹션을 순서대로 작성해:
-
-## 🎯 목표 Task
-이 논문이 풀고자 하는 문제와 왜 중요한지(motivation)를 서술.
-
-## 🔍 기존 연구의 접근 방법
-기존 방법론들의 핵심 아이디어를 한 줄씩 나열하고, 공통 한계를 정리.
-
-## 📚 배경지식
-이 논문 이해에 필요한 사전 개념 설명. 불필요하면 섹션 생략.
-
-## ✨ 제안 방법의 차별점
-"기존에는 X였는데, 이 논문은 Y를 한다" 형식으로 대비해서 서술.
-
-## 🛠️ 제안 방법의 구체적인 내용
-Step-by-step으로 상세히 설명. 압축하지 말고 각 단계를 충분히 풀어서 서술.
-- Step 1, Step 2, ... 형식으로 번호를 붙여 순서대로 설명
-- 각 Step마다: 무엇을 하는지(목적) / 어떻게 하는지(구체적 방법, 수식) / 왜 이렇게 하는지(직관적 이유) 포함
-- 모델 구조는 입력->처리->출력 흐름으로 추적
-- 핵심 수식이 있으면 LaTeX로 작성하고 각 기호의 의미를 설명
-- 독자가 이 섹션만 읽어도 방법론을 직접 구현할 수 있는 수준 목표
-
-## 🧪 실험
-- 데이터셋: 어떤 데이터로 실험했는지
-- 평가 지표: 어떤 metric으로 측정했는지
-- 성능 결과: 기존 방법 대비 수치 포함 (가능하면 마크다운 표로)
-
-## 🔴 비판적 분석
-균형 있는 시각으로 구체적 이유와 함께 서술:
-- 실험의 한계 (설계, 데이터셋, 비교 대상)
-- 방법론의 한계 (가정, 일반화, 계산 비용)
-- 주장의 근거 충분성
-- 향후 개선 방향
-
-논문에 명시되지 않은 내용은 추측하지 말고 "논문에서 명확히 서술되지 않음"으로 표기.
-
----
-논문 제목: {title}
-저자: {authors}
-초록: {abstract}"""
-
 # ── State 관리 ────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
@@ -206,32 +159,97 @@ def is_top_venue(venue: str) -> bool:
     return any(top.upper() in v for top in TOP_VENUES)
 
 
-# ── 요약 생성 ─────────────────────────────────────────────────────────────
+# ── 요약 프롬프트 (논문 전문 기반) ──────────────────────────────────────
+SUMMARY_PROMPT = """아래 논문 전문을 읽고 한국어로 구조적으로 분석해줘.
+모델명·데이터셋명·평가 지표·알고리즘명 등 전문 용어는 영어 원문 유지.
+한국어로 번역 시 의미가 불명확한 개념은 한국어(영어) 형식으로 병기.
+수식은 LaTeX 형식($...$, $$...$$)으로 작성. 표는 마크다운 표 형식으로 작성.
+논문에 명시된 내용만 서술하고, 없는 내용은 추측하지 말고 "논문에서 명확히 서술되지 않음"으로 표기.
 
-VERIFY_PROMPT = """다음은 논문 전문(full text)과 AI가 생성한 논문 요약이야.
-요약에서 논문 전문에 없는 내용을 추측하거나 hallucinate한 부분이 있으면 수정해줘.
+아래 7개 섹션을 순서대로 작성해:
 
-규칙:
-- 논문 전문에 없는 구체적 알고리즘명, 기법명, 수식, 주장이 요약에 나오면 "논문에서 명확히 서술되지 않음"으로 대체
-- 논문 전문에서 직접 확인되는 내용은 그대로 유지
-- 논문 전문에서 유추 가능한 일반적 설명은 유지해도 됨
-- 수정이 필요 없으면 요약을 그대로 반환
-- 요약 전체를 그대로 반환 (설명 없이, 마크다운 형식 유지)
+## 🎯 목표 Task
+이 논문이 풀고자 하는 문제와 왜 중요한지(motivation)를 서술.
 
+## 🔍 기존 연구의 접근 방법
+기존 방법론들의 핵심 아이디어를 한 줄씩 나열하고, 공통 한계를 정리.
+
+## 📚 배경지식
+이 논문 이해에 필요한 사전 개념 설명. 불필요하면 섹션 생략.
+
+## ✨ 제안 방법의 차별점
+"기존에는 X였는데, 이 논문은 Y를 한다" 형식으로 대비해서 서술.
+
+## 🛠️ 제안 방법의 구체적인 내용
+Step-by-step으로 상세히 설명. 압축하지 말고 각 단계를 충분히 풀어서 서술.
+- Step 1, Step 2, ... 형식으로 번호를 붙여 순서대로 설명
+- 각 Step마다: 무엇을 하는지(목적) / 어떻게 하는지(구체적 방법, 수식) / 왜 이렇게 하는지(직관적 이유) 포함
+- 모델 구조는 입력->처리->출력 흐름으로 추적
+- 핵심 수식이 있으면 LaTeX로 작성하고 각 기호의 의미를 설명
+- 독자가 이 섹션만 읽어도 방법론을 직접 구현할 수 있는 수준 목표
+
+## 🧪 실험
+- 데이터셋: 어떤 데이터로 실험했는지
+- 평가 지표: 어떤 metric으로 측정했는지
+- 성능 결과: 기존 방법 대비 수치 포함 (가능하면 마크다운 표로)
+
+## 🔴 비판적 분석
+균형 있는 시각으로 구체적 이유와 함께 서술:
+- 실험의 한계 (설계, 데이터셋, 비교 대상)
+- 방법론의 한계 (가정, 일반화, 계산 비용)
+- 주장의 근거 충분성
+- 향후 개선 방향
+
+---
 논문 제목: {title}
+저자: {authors}
 
 논문 전문:
-{full_text}
+{full_text}"""
 
-AI 생성 요약:
-{summary}"""
+# 전문 추출 실패 시 폴백용 (초록만 있을 때)
+SUMMARY_PROMPT_ABSTRACT_ONLY = """아래 논문 초록을 바탕으로 한국어로 분석해줘.
+전문을 확인할 수 없으므로 초록에서 확인되는 내용만 서술하고,
+초록에 없는 세부 내용은 반드시 "논문에서 명확히 서술되지 않음"으로 표기.
+모델명·데이터셋명·평가 지표·알고리즘명 등 전문 용어는 영어 원문 유지.
+수식은 LaTeX 형식($...$, $$...$$)으로 작성. 표는 마크다운 표 형식으로 작성.
 
+아래 7개 섹션을 순서대로 작성해:
+
+## 🎯 목표 Task
+이 논문이 풀고자 하는 문제와 왜 중요한지(motivation)를 서술.
+
+## 🔍 기존 연구의 접근 방법
+기존 방법론들의 핵심 아이디어를 한 줄씩 나열하고, 공통 한계를 정리.
+
+## 📚 배경지식
+이 논문 이해에 필요한 사전 개념 설명. 불필요하면 섹션 생략.
+
+## ✨ 제안 방법의 차별점
+"기존에는 X였는데, 이 논문은 Y를 한다" 형식으로 대비해서 서술.
+
+## 🛠️ 제안 방법의 구체적인 내용
+초록에서 확인 가능한 범위 내에서 서술. 세부 내용은 "논문에서 명확히 서술되지 않음" 표기.
+
+## 🧪 실험
+초록에서 언급된 실험 정보만 서술.
+
+## 🔴 비판적 분석
+균형 있는 시각으로 서술.
+
+---
+논문 제목: {title}
+저자: {authors}
+초록: {abstract}"""
+
+
+# ── 요약 생성 ─────────────────────────────────────────────────────────────
 
 def extract_paper_text(arxiv_id: str) -> str | None:
     """arXiv PDF에서 전문 텍스트 추출. 실패 시 None 반환."""
     try:
-        import fitz  # pymupdf
-        import tempfile
+        import fitz
+        import tempfile, os
 
         pid  = arxiv_id.split("v")[0]
         url  = f"https://arxiv.org/pdf/{pid}.pdf"
@@ -247,60 +265,54 @@ def extract_paper_text(arxiv_id: str) -> str | None:
         doc  = fitz.open(tmp_path)
         text = "\n".join(page.get_text("text") for page in doc)
         doc.close()
-
-        import os
         os.unlink(tmp_path)
 
-        # 너무 길면 앞부분 위주로 잘라서 사용 (Claude 컨텍스트 한계 고려)
-        # 보통 논문은 본문이 앞에 있고, 참고문헌은 뒤에 있으므로 앞 80%만 사용
-        max_chars = 60000
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n...(이하 생략)"
+        # 참고문헌 이전까지만 사용 (References/Bibliography 섹션 제거)
+        for ref_marker in ["References\n", "REFERENCES\n", "Bibliography\n"]:
+            idx = text.rfind(ref_marker)
+            if idx > len(text) * 0.5:  # 뒤쪽 절반에 있는 경우만
+                text = text[:idx]
+                break
+
+        # 최대 60000자 (약 30~40페이지)
+        if len(text) > 60000:
+            text = text[:60000] + "\n...(이하 생략)"
 
         return text.strip()
     except ImportError:
-        print("  pymupdf 없음 — 전문 검증 건너뜀")
+        print("    pymupdf 없음")
         return None
     except Exception as e:
-        print(f"  PDF 텍스트 추출 실패: {e}")
+        print(f"    PDF 추출 실패: {e}")
         return None
 
 
 def summarize_paper(paper: dict) -> str:
-    """7섹션 전체 요약 생성 후 논문 전문 기반 사실 검증."""
-    # 1단계: 요약 생성
-    msg = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=8192,
-        messages=[{"role": "user", "content": SUMMARY_PROMPT.format(
-            title=paper["title"],
-            authors=paper["authors"],
-            abstract=paper["abstract"],
-        )}],
-    )
-    summary = msg.content[0].text
-
-    # 2단계: PDF 전문 추출
+    """논문 전문을 추출해서 요약 생성. 전문 추출 실패 시 초록으로 폴백."""
     print(f"    논문 전문 다운로드 중...")
     full_text = extract_paper_text(paper["id"])
 
-    if not full_text:
-        # 전문 추출 실패 시 초록으로 폴백
-        print(f"    전문 추출 실패 — 초록으로 검증")
-        full_text = f"(전문 추출 실패, 초록만 사용)\n\n{paper['abstract']}"
+    if full_text:
+        print(f"    전문 {len(full_text)}자 추출 완료 — 전문 기반 요약 생성")
+        prompt = SUMMARY_PROMPT.format(
+            title=paper["title"],
+            authors=paper["authors"],
+            full_text=full_text,
+        )
+    else:
+        print(f"    전문 추출 실패 — 초록 기반 요약 생성")
+        prompt = SUMMARY_PROMPT_ABSTRACT_ONLY.format(
+            title=paper["title"],
+            authors=paper["authors"],
+            abstract=paper["abstract"],
+        )
 
-    # 3단계: 전문 기반 사실 검증
-    print(f"    사실 검증 중...")
-    verify_msg = client.messages.create(
+    msg = client.messages.create(
         model="claude-opus-4-5",
         max_tokens=8192,
-        messages=[{"role": "user", "content": VERIFY_PROMPT.format(
-            title=paper["title"],
-            full_text=full_text,
-            summary=summary,
-        )}],
+        messages=[{"role": "user", "content": prompt}],
     )
-    return verify_msg.content[0].text
+    return msg.content[0].text
 
 def _simple_md_to_html(text: str) -> str:
     """이메일 본문용 간단한 마크다운 → HTML 변환.
