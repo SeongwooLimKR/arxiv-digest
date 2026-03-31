@@ -312,7 +312,49 @@ def summarize_paper(paper: dict) -> str:
         max_tokens=8192,
         messages=[{"role": "user", "content": prompt}],
     )
-    return msg.content[0].text
+    return _normalize_latex(msg.content[0].text)
+
+
+def _normalize_latex(text: str) -> str:
+    """Claude API가 \\phi처럼 이중 백슬래시로 LaTeX를 출력하는 경우 단일 백슬래시로 정규화.
+    $...$ 와 $$...$$ 블록 내부에서만 처리. \\\\(줄바꿈)는 유지."""
+    result = []
+    i = 0
+    while i < len(text):
+        # $$ 블록 처리
+        if text[i:i+2] == '$$':
+            end = text.find('$$', i + 2)
+            if end == -1:
+                result.append(text[i:])
+                break
+            block = text[i:end + 2]
+            block = _fix_double_backslash(block)
+            result.append(block)
+            i = end + 2
+        # $ 블록 처리 ($$는 위에서 처리됨)
+        elif text[i] == '$' and (i == 0 or text[i-1] != '$'):
+            end = i + 1
+            while end < len(text) and text[end] != '$':
+                end += 1
+            if end >= len(text):
+                result.append(text[i:])
+                break
+            block = text[i:end + 1]
+            block = _fix_double_backslash(block)
+            result.append(block)
+            i = end + 1
+        else:
+            result.append(text[i])
+            i += 1
+    return ''.join(result)
+
+
+def _fix_double_backslash(math_block: str) -> str:
+    """수식 블록 내 \\cmd → \cmd 변환.
+    LaTeX 줄바꿈(\\\\)과 공백/닫는괄호 앞 \\ 는 유지."""
+    # \\cmd (알파벳 또는 { 로 시작하는 LaTeX 명령어) → \cmd
+    # lambda 사용: replacement 문자열의 \t, \n 등 오해석 방지
+    return re.sub(r'\\\\([a-zA-Z{])', lambda m: '\\' + m.group(1), math_block)
 
 def _simple_md_to_html(text: str) -> str:
     """이메일 본문용 간단한 마크다운 → HTML 변환.
@@ -403,14 +445,16 @@ def create_paper_html(paper: dict, summary: str) -> str:
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
         venue_str = f"<br><strong>학회:</strong> {paper['venue']}{yr}"
 
-    # JS 문자열에 안전하게 삽입하기 위해 json.dumps로 이스케이프
+    # 메타 정보는 JS 문자열에 삽입하므로 json.dumps로 이스케이프
     authors_js   = json.dumps(paper['authors'])
     published_js = json.dumps(str(paper['published']))
     venue_js     = json.dumps(venue_str)
     url_js       = json.dumps(paper['url'])
-    # summary도 json.dumps로 인코딩 → JS에서 JSON.parse로 읽음
-    # 이렇게 하면 백슬래시 이중 처리 문제가 완전히 사라짐
-    summary_json = json.dumps(summary)
+
+    # summary는 <script type="application/json"> 태그에 직접 저장
+    # → JS 문자열 이스케이프 레이어가 없어서 이중 백슬래시 문제 완전 해결
+    # 유일하게 필요한 처리: </script> 시퀀스가 태그를 조기 종료하는 것 방지
+    summary_json_safe = json.dumps(summary).replace("</script>", "<\\/script>")
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -419,7 +463,6 @@ def create_paper_html(paper: dict, summary: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{paper['title']}</title>
 
-<!-- MathJax: 수식 렌더링 -->
 <script>
 MathJax = {{
   tex: {{
@@ -431,8 +474,6 @@ MathJax = {{
 }};
 </script>
 <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
-
-<!-- marked.js: 마크다운 → HTML -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
 <style>
@@ -465,6 +506,9 @@ MathJax = {{
 </head>
 <body>
 
+<!-- summary를 JSON으로 저장 — JS 문자열 이스케이프 없이 안전하게 전달 -->
+<script type="application/json" id="summary-data">{summary_json_safe}</script>
+
 <h1 id="title"></h1>
 <div class="meta" id="meta"></div>
 <hr>
@@ -481,39 +525,36 @@ MathJax = {{
 
   marked.setOptions({{ gfm: true, breaks: true }});
 
-  // summary를 JSON으로 파싱 → 백슬래시 이중 처리 문제 완전 해결
-  const raw = JSON.parse({summary_json});
+  // script 태그에서 직접 읽기 → JSON.parse 한 번만 → 이중 이스케이프 없음
+  const raw = JSON.parse(document.getElementById('summary-data').textContent);
+
+  // 수식 블록을 플레이스홀더로 보호 → marked 실행 → 복원 → MathJax 렌더링
+  // 플레이스홀더에 언더스코어 없이 구성 (marked.js가 _를 이탤릭으로 처리하는 것 방지)
   const mathStore = [];
 
-  // 1단계: $$...$$ (display math) 를 플레이스홀더로 교체
   let protected_ = raw.replace(/\$\$([\s\S]+?)\$\$/g, (match) => {{
     const idx = mathStore.length;
     mathStore.push(match);
-    return `MATHPLACEHOLDER_DISPLAY_${{idx}}_END`;
+    return `MATHDISPx${{idx}}xEND`;
   }});
 
-  // 2단계: $...$ (inline math) 를 플레이스홀더로 교체
   protected_ = protected_.replace(/\$([^\$\n]+?)\$/g, (match) => {{
     const idx = mathStore.length;
     mathStore.push(match);
-    return `MATHPLACEHOLDER_INLINE_${{idx}}_END`;
+    return `MATHINLx${{idx}}xEND`;
   }});
 
-  // 3단계: marked.js로 마크다운 → HTML 변환
   let html = marked.parse(protected_);
 
-  // 4단계: 플레이스홀더를 원본 수식으로 복원
-  html = html.replace(/MATHPLACEHOLDER_DISPLAY_(\d+)_END/g, (_, idx) => mathStore[parseInt(idx)]);
-  html = html.replace(/MATHPLACEHOLDER_INLINE_(\d+)_END/g, (_, idx) => mathStore[parseInt(idx)]);
+  html = html.replace(/MATHDISPx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
+  html = html.replace(/MATHINLx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
 
   document.getElementById('content').innerHTML = html;
 
-  // 5단계: MathJax로 수식 렌더링
   if (window.MathJax) MathJax.typesetPromise();
 </script>
 </body>
 </html>"""
-
 
 # ── 이메일 빌드 ───────────────────────────────────────────────────────────
 
