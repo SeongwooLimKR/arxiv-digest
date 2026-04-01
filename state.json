@@ -7,9 +7,16 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 1,
-  "sent_papers": [],
-  "pending_feedback": [],
-  "waiting_for_feedback": false,
+  "sent_papers": [
+    "2403.15933"
+  ],
+  "pending_feedback": [
+    {
+      "id": "2403.15933",
+      "title": "Understanding Domain-Size Generalization in Markov Logic Networks"
+    }
+  ],
+  "waiting_for_feedback": true,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
