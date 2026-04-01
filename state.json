@@ -7,16 +7,9 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 1,
-  "sent_papers": [
-    "2305.20052"
-  ],
-  "pending_feedback": [
-    {
-      "id": "2305.20052",
-      "title": "Integrated Decision Gradients: Compute Your Attributions Where the Model Makes Its Decision"
-    }
-  ],
-  "waiting_for_feedback": true,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
