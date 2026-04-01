@@ -438,6 +438,55 @@ def extract_goal_section(summary: str) -> str:
 
 # ── MD 파일 생성 ──────────────────────────────────────────────────────────
 
+def _make_js_script(title_json, authors_js, published_js, venue_js, url_js, date_str):
+    """HTML에 삽입할 JS 코드를 생성. f-string 이스케이프 없이 정확한 JS를 만들기 위해 분리."""
+    # 각 JS 정규식을 Python 문자열로 명확하게 작성
+    # JS: /\$\$([\s\S]+?)\$\$/g  → Python raw string: r'/\$\$([\s\S]+?)\$\$/g'
+    # JS: /\$([^\$\n]+?)\$/g     → Python raw string: r'/\$([^\$\n]+?)\$/g'
+    # JS: /\\\\([a-zA-Z{])/g     → Python raw string: r'/\\\\([a-zA-Z{])/g'
+    # JS replacement '\\$1'      → Python: "'\\\\$1'"  → output: '\\$1' → JS: \+group
+    return (
+        "<script>\n"
+        f"  document.getElementById('title').textContent = {title_json};\n"
+        f"  document.getElementById('meta').innerHTML =\n"
+        f"    '<strong>저자:</strong> ' + {authors_js} + ' &nbsp;|&nbsp; '\n"
+        f"    + '<strong>출판:</strong> ' + {published_js}\n"
+        f"    + {venue_js}\n"
+        f"    + '<br><strong>arXiv:</strong> <a href=\"' + {url_js} + '\" target=\"_blank\">' + {url_js} + '</a>';\n"
+        "\n"
+        "  marked.setOptions({ gfm: true, breaks: true });\n"
+        "\n"
+        "  const raw = JSON.parse(document.getElementById('summary-data').textContent);\n"
+        "  const mathStore = [];\n"
+        "\n"
+        "  let protected_ = raw.replace(/\\$\\$([\\s\\S]+?)\\$\\$/g, (match) => {\n"
+        "    const idx = mathStore.length;\n"
+        "    mathStore.push(match);\n"
+        "    return `MATHDISPx${idx}xEND`;\n"
+        "  });\n"
+        "\n"
+        "  protected_ = protected_.replace(/\\$([^\\$\\n]+?)\\$/g, (match) => {\n"
+        "    const idx = mathStore.length;\n"
+        "    mathStore.push(match);\n"
+        "    return `MATHINLx${idx}xEND`;\n"
+        "  });\n"
+        "\n"
+        "  let html = marked.parse(protected_);\n"
+        "\n"
+        "  html = html.replace(/MATHDISPx(\\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);\n"
+        "  html = html.replace(/MATHINLx(\\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);\n"
+        "\n"
+        "  // 수식 내 이중 백슬래시(\\\\cmd)를 단일 백슬래시(\\cmd)로 정규화\n"
+        "  html = html.replace(/(\\$\\$[\\s\\S]+?\\$\\$|\\$[^\\$\\n]+?\\$)/g, (mathBlock) => {\n"
+        "    return mathBlock.replace(/\\\\\\\\([a-zA-Z{])/g, '\\\\$1');\n"
+        "  });\n"
+        "\n"
+        "  document.getElementById('content').innerHTML = html;\n"
+        "  if (window.MathJax) MathJax.typesetPromise();\n"
+        "</script>"
+    )
+
+
 def create_paper_html(paper: dict, summary: str) -> str:
     """논문 요약 HTML 생성 — MathJax(수식) + marked.js(마크다운) 렌더링."""
     venue_str = ""
@@ -445,16 +494,80 @@ def create_paper_html(paper: dict, summary: str) -> str:
         yr = f" {paper['venue_year']}" if paper.get("venue_year") else ""
         venue_str = f"<br><strong>학회:</strong> {paper['venue']}{yr}"
 
-    # 메타 정보는 JS 문자열에 삽입하므로 json.dumps로 이스케이프
     authors_js   = json.dumps(paper['authors'])
     published_js = json.dumps(str(paper['published']))
     venue_js     = json.dumps(venue_str)
     url_js       = json.dumps(paper['url'])
+    title_json   = json.dumps(paper['title'])
+    date_str     = datetime.now().strftime('%Y-%m-%d')
 
-    # summary는 <script type="application/json"> 태그에 직접 저장
-    # → JS 문자열 이스케이프 레이어가 없어서 이중 백슬래시 문제 완전 해결
-    # 유일하게 필요한 처리: </script> 시퀀스가 태그를 조기 종료하는 것 방지
+    # summary를 JSON으로 안전하게 저장
     summary_json_safe = json.dumps(summary).replace("</script>", "<\\/script>")
+
+    # JS 코드는 별도 함수에서 생성 (f-string 이스케이프 문제 방지)
+    js_script = _make_js_script(title_json, authors_js, published_js, venue_js, url_js, date_str)
+
+    return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{paper['title']}</title>
+
+<script>
+MathJax = {{
+  tex: {{
+    inlineMath: [['$', '$']],
+    displayMath: [['$$', '$$']],
+    processEscapes: true,
+  }},
+  options: {{ skipHtmlTags: ['script','noscript','style','textarea'] }}
+}};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 820px;
+    margin: 40px auto;
+    padding: 0 24px 60px;
+    color: #1a1a2e;
+    line-height: 1.75;
+    background: #fff;
+  }}
+  h1 {{ font-size: 22px; font-weight: 600; border-bottom: 2px solid #7c5cbf; padding-bottom: 10px; }}
+  h2 {{ font-size: 17px; font-weight: 600; color: #5a3ea8; margin-top: 32px; border-left: 4px solid #7c5cbf; padding-left: 10px; }}
+  h3 {{ font-size: 15px; font-weight: 600; color: #333; margin-top: 20px; }}
+  .meta {{ color: #888; font-size: 13px; margin: 8px 0 20px; }}
+  .meta a {{ color: #7c5cbf; text-decoration: none; }}
+  hr {{ border: none; border-top: 1px solid #eee; margin: 24px 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px; }}
+  th {{ background: #f0eeff; color: #5a3ea8; padding: 8px 12px; text-align: left; border: 1px solid #d4ccf5; }}
+  td {{ padding: 7px 12px; border: 1px solid #e8e8e8; }}
+  tr:nth-child(even) td {{ background: #faf9ff; }}
+  code {{ background: #f0eeff; padding: 2px 6px; border-radius: 4px; font-size: 13px; font-family: "SF Mono", Menlo, monospace; }}
+  pre {{ background: #f6f5ff; border-radius: 6px; padding: 14px; overflow-x: auto; }}
+  pre code {{ background: none; padding: 0; }}
+  blockquote {{ border-left: 3px solid #d4ccf5; margin: 0; padding-left: 16px; color: #666; }}
+  li {{ margin: 4px 0; }}
+  .footer {{ color: #bbb; font-size: 11px; margin-top: 40px; border-top: 1px solid #eee; padding-top: 10px; }}
+</style>
+</head>
+<body>
+
+<script type="application/json" id="summary-data">{summary_json_safe}</script>
+
+<h1 id="title"></h1>
+<div class="meta" id="meta"></div>
+<hr>
+<div id="content"></div>
+<div class="footer">생성일: {date_str} | GitHub Actions + Claude API</div>
+
+{js_script}
+</body>
+</html>"""
 
     return f"""<!DOCTYPE html>
 <html lang="ko">
@@ -513,52 +626,9 @@ MathJax = {{
 <div class="meta" id="meta"></div>
 <hr>
 <div id="content"></div>
-<div class="footer">생성일: {datetime.now().strftime('%Y-%m-%d')} | GitHub Actions + Claude API</div>
+<div class="footer">생성일: {date_str} | GitHub Actions + Claude API</div>
 
-<script>
-  document.getElementById('title').textContent = {json.dumps(paper['title'])};
-  document.getElementById('meta').innerHTML =
-    '<strong>저자:</strong> ' + {authors_js} + ' &nbsp;|&nbsp; '
-    + '<strong>출판:</strong> ' + {published_js}
-    + {venue_js}
-    + '<br><strong>arXiv:</strong> <a href="' + {url_js} + '" target="_blank">' + {url_js} + '</a>';
-
-  marked.setOptions({{ gfm: true, breaks: true }});
-
-  // script 태그에서 직접 읽기 → JSON.parse 한 번만 → 이중 이스케이프 없음
-  const raw = JSON.parse(document.getElementById('summary-data').textContent);
-
-  // 수식 블록을 플레이스홀더로 보호 → marked 실행 → 복원 → MathJax 렌더링
-  // 플레이스홀더에 언더스코어 없이 구성 (marked.js가 _를 이탤릭으로 처리하는 것 방지)
-  const mathStore = [];
-
-  let protected_ = raw.replace(/\$\$([\s\S]+?)\$\$/g, (match) => {{
-    const idx = mathStore.length;
-    mathStore.push(match);
-    return `MATHDISPx${{idx}}xEND`;
-  }});
-
-  protected_ = protected_.replace(/\$([^\$\n]+?)\$/g, (match) => {{
-    const idx = mathStore.length;
-    mathStore.push(match);
-    return `MATHINLx${{idx}}xEND`;
-  }});
-
-  let html = marked.parse(protected_);
-
-  html = html.replace(/MATHDISPx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
-  html = html.replace(/MATHINLx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
-
-  // 수식 내 이중 백슬래시를 단일 백슬래시로 정규화
-  // Claude API가 \\phi처럼 이중 백슬래시로 출력하는 경우 대응
-  html = html.replace(/(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g, (mathBlock) => {{
-    return mathBlock.replace(/\\\\([a-zA-Z{{])/g, '\\$1');
-  }});
-
-  document.getElementById('content').innerHTML = html;
-
-  if (window.MathJax) MathJax.typesetPromise();
-</script>
+{js_script}
 </body>
 </html>"""
 
