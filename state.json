@@ -7,16 +7,9 @@
     "interpolation path attribution explainability"
   ],
   "batch_size": 1,
-  "sent_papers": [
-    "2511.09174"
-  ],
-  "pending_feedback": [
-    {
-      "id": "2511.09174",
-      "title": "Tractable Weighted First-Order Model Counting with Bounded Treewidth Binary Evidence"
-    }
-  ],
-  "waiting_for_feedback": true,
+  "sent_papers": [],
+  "pending_feedback": [],
+  "waiting_for_feedback": false,
   "feedback_history": [],
   "processed_message_ids": [],
   "seed_papers": [
