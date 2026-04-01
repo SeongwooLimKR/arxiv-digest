@@ -549,6 +549,12 @@ MathJax = {{
   html = html.replace(/MATHDISPx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
   html = html.replace(/MATHINLx(\d+)xEND/g, (_, idx) => mathStore[parseInt(idx)]);
 
+  // 수식 내 이중 백슬래시를 단일 백슬래시로 정규화
+  // Claude API가 \\phi처럼 이중 백슬래시로 출력하는 경우 대응
+  html = html.replace(/(\$\$[\s\S]+?\$\$|\$[^\$\n]+?\$)/g, (mathBlock) => {{
+    return mathBlock.replace(/\\\\([a-zA-Z{{])/g, '\\$1');
+  }});
+
   document.getElementById('content').innerHTML = html;
 
   if (window.MathJax) MathJax.typesetPromise();
